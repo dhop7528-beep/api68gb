@@ -1,26 +1,30 @@
+// ============================================================
+//  TÀI XỈU REALTIME - Cloudflare Workers + Durable Objects (API + WS)
+// ============================================================
+
 const WSS_URL = 'https://koay56bcni5e0mk.cq.qnwxdhwica.com/';
 const MAX_HISTORY = 50;
 
-const SUPERVISOR_INTERVAL_MS = 15000;
-const STALE_OPEN_TIMEOUT_MS = 60000;
-const WATCHDOG_TIMEOUT_MS = 3 * 60 * 1000;
-const RELOGIN_INTERVAL_MS = 45 * 60 * 1000;
-const RECONNECT_MIN_MS = 5000;
-const RECONNECT_MAX_MS = 120000;
-const STABLE_CONNECTION_MS = 30000;
+const SUPERVISOR_INTERVAL_MS   = 15000;
+const STALE_OPEN_TIMEOUT_MS    = 60000;
+const WATCHDOG_TIMEOUT_MS      = 3 * 60 * 1000;
+const RELOGIN_INTERVAL_MS      = 45 * 60 * 1000;
+const RECONNECT_MIN_MS         = 5000;
+const RECONNECT_MAX_MS         = 120000;
+const STABLE_CONNECTION_MS     = 30000;
 const MAX_CONSECUTIVE_FAILURES = 10;
-const FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
+const FAILURE_COOLDOWN_MS      = 5 * 60 * 1000;
 
-const HANDSHAKE_HEX = "010000727b22737973223a7b22706c6174666f726d223a226a732d776562736f636b6574222c22636c69656e744275696c644e756d626572223a22302e302e31222c22636c69656e7456657273696f6e223a223061323134383164373436663932663834323865316236646565623736666561227d7d";
-const LOGIN_HEX = "0400004d01040001080210ca011a40373537626233613938353539346563356133303764333537343666366565626138356432373862336536373634343061626265393239383531316535393537624200";
-const JOIN_ROOM_HEX = "040000250005226d6e6d6473622e6d6e6d64736268616e646c65722e656e74657267616d65726f6f6d";
-const JOIN_TX_HEX = "0400002b0006286d6e7368616962616f2e6d6e7368616962616f68616e646c65722e656e74657267616d65726f6f6d";
+const HANDSHAKE_HEX   = "010000727b22737973223a7b22706c6174666f726d223a226a732d776562736f636b6574222c22636c69656e744275696c644e756d626572223a22302e302e31222c22636c69656e7456657273696f6e223a223061323134383164373436663932663834323865316236646565623736666561227d7d";
+const LOGIN_HEX       = "0400004d01040001080210ca011a40373537626233613938353539346563356133303764333537343666366565626138356432373862336536373634343061626265393239383531316535393537624200";
+const JOIN_ROOM_HEX   = "040000250005226d6e6d6473622e6d6e6d64736268616e646c65722e656e74657267616d65726f6f6d";
+const JOIN_TX_HEX     = "0400002b0006286d6e7368616962616f2e6d6e7368616962616f68616e646c65722e656e74657267616d65726f6f6d";
 
 const HANDSHAKE_BUF = hexToBytes(HANDSHAKE_HEX);
 const HANDSHAKE_ACK_BUF = new Uint8Array([0x02, 0x00, 0x00, 0x00]);
-const LOGIN_BUF = hexToBytes(LOGIN_HEX);
+const LOGIN_BUF     = hexToBytes(LOGIN_HEX);
 const JOIN_ROOM_BUF = hexToBytes(JOIN_ROOM_HEX);
-const JOIN_TX_BUF = hexToBytes(JOIN_TX_HEX);
+const JOIN_TX_BUF   = hexToBytes(JOIN_TX_HEX);
 const HEARTBEAT_BUF = new Uint8Array([0x03, 0x00, 0x00, 0x00]);
 
 function hexToBytes(hex) {
@@ -37,8 +41,7 @@ function bytesToHex(buf) {
 
 function calcStats(list, n = 20) {
   const recent = list.slice(0, n);
-  let tai = 0;
-  let xiu = 0;
+  let tai = 0, xiu = 0;
   for (const s of recent) {
     if (s.result === 'TÀI') tai++;
     else if (s.result === 'XỈU') xiu++;
@@ -71,8 +74,7 @@ function decodeRawProtobuf(buffer) {
   let offset = 0;
   const result = {};
   function readVarint() {
-    let value = 0n;
-    let shift = 0n;
+    let value = 0n, shift = 0n;
     while (offset < buffer.length) {
       const b = buffer[offset++];
       value |= BigInt(b & 0x7f) << shift;
@@ -126,8 +128,8 @@ function md5Fallback(s) {
   function hh(a, b, c, d, x, s, t) { return cmn(b ^ c ^ d, a, b, x, s, t); }
   function ii(a, b, c, d, x, s, t) { return cmn(c ^ (b | (~d)), a, b, x, s, t); }
   function hex(n) {
-    let out = '';
-    for (let j = 0; j <= 3; j++) {
+    let out = '', j;
+    for (j = 0; j <= 3; j++) {
       out += ((n >>> (j * 8 + 4)) & 0x0F).toString(16) + ((n >>> (j * 8)) & 0x0F).toString(16);
     }
     return out;
@@ -135,7 +137,8 @@ function md5Fallback(s) {
   function str2blks(str) {
     const nblk = ((str.length + 8) >> 6) + 1;
     const blks = new Array(nblk * 16).fill(0);
-    for (let i = 0; i < str.length; i++) {
+    let i;
+    for (i = 0; i < str.length; i++) {
       blks[i >> 2] |= str.charCodeAt(i) << ((i % 4) * 8);
     }
     blks[i >> 2] |= 0x80 << ((i % 4) * 8);
@@ -144,10 +147,7 @@ function md5Fallback(s) {
   }
   const utf8Str = unescape(encodeURIComponent(s));
   const x = str2blks(utf8Str);
-  let a = 1732584193;
-  let b = -271733879;
-  let c = -1732584194;
-  let d = 271733878;
+  let a = 1732584193, b = -271733879, c = -1732584194, d = 271733878;
   for (let i = 0; i < x.length; i += 16) {
     const oa = a, ob = b, oc = c, od = d;
     a = ff(a, b, c, d, x[i + 0], 7, -680876936); d = ff(d, a, b, c, x[i + 1], 12, -389564586);
@@ -187,8 +187,6 @@ function md5Fallback(s) {
   return hex(a) + hex(b) + hex(c) + hex(d);
 }
 
-const HTML_PAGE = '<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tai Xiu Realtime</title><style>*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#0f172a;color:#e2e8f0;padding:12px}h1{text-align:center;font-size:18px;margin:0 0 8px;color:#38bdf8}.api-links{text-align:center;margin-bottom:12px;font-size:13px}.api-links a{color:#38bdf8;text-decoration:none;margin:0 4px;padding:4px 10px;border:1px solid #38bdf8;border-radius:4px;display:inline-block;margin-bottom:4px}.toolbar{text-align:center;margin-bottom:12px}.toolbar input{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:8px 12px;border-radius:6px;width:180px;font-size:14px}.toolbar button{background:#ef4444;color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;margin-left:6px;font-size:14px}.status{text-align:center;margin-bottom:12px;font-size:12px;color:#94a3b8}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:1400px;margin:0 auto}@media(max-width:900px){.grid{grid-template-columns:1fr}}.panel{background:#1e293b;border-radius:10px;overflow:hidden;border:1px solid #334155}.panel h2{margin:0;padding:10px;font-size:14px;text-align:center;color:#fff}.panel.md5 h2{background:#8b5cf6}.panel.tx h2{background:#f59e0b}table{width:100%;border-collapse:collapse;font-size:13px}td{padding:8px;border-top:1px solid #334155}.tai{color:#22c55e;font-weight:bold}.xiu{color:#ef4444;font-weight:bold}.empty{text-align:center;padding:30px;color:#64748b}</style></head><body><h1>TAI XIU REALTIME</h1><div class="api-links"><a href="/api/md5" target="_blank">/api/md5</a><a href="/api/tx" target="_blank">/api/tx</a><a href="/api/all" target="_blank">/api/all</a><a href="/api/status" target="_blank">/api/status</a></div><div class="toolbar"><input id="search" placeholder="Tim ma phien..."><button onclick="clearAll()">Clear</button></div><div class="status"><span id="conn">Dang ket noi...</span> | MD5: <b id="countMd5">0</b> | Thuong: <b id="countTx">0</b></div><div class="grid"><div class="panel md5"><h2>TAI XIU MD5</h2><table><tbody id="bodyMd5"><tr><td class="empty">Chua co du lieu...</td></tr></tbody></table></div><div class="panel tx"><h2>TAI XIU THUONG</h2><table><tbody id="bodyTx"><tr><td class="empty">Chua co du lieu...</td></tr></tbody></table></div></div><script>const proto=location.protocol==="https:"?"wss:":"ws:";let ws;const rows={md5:[],tx:[]};function connectWs(){ws=new WebSocket(proto+"//"+location.host+"/ws");ws.onopen=()=>{document.getElementById("conn").textContent="Dang nhan realtime"};ws.onclose=()=>{document.getElementById("conn").textContent="Mat ket noi, thu lai...";setTimeout(connectWs,3000)};ws.onmessage=(ev)=>{const msg=JSON.parse(ev.data);if(msg.event==="init"){rows.md5=msg.md5||[];rows.tx=msg.tx||[];render("md5");render("tx")}else if(msg.event==="result"){const t=msg.type;rows[t].unshift(msg.data);if(rows[t].length>50)rows[t].pop();render(t)}}}connectWs();function render(t){const tbody=document.getElementById(t==="md5"?"bodyMd5":"bodyTx");const f=document.getElementById("search").value.trim();const list=f?rows[t].filter(r=>String(r.matchId).includes(f)):rows[t];document.getElementById(t==="md5"?"countMd5":"countTx").textContent=rows[t].length;if(!list.length){tbody.innerHTML="<tr><td class=empty>Chua co du lieu...</td></tr>";return}tbody.innerHTML=list.map(r=>{if(!r.result)return "<tr><td>#"+r.matchId+"</td><td colspan=3>Dang cho ket qua...</td></tr>";const cls=r.result==="TÀI"?"tai":"xiu";return "<tr><td><b>#"+r.matchId+"</b></td><td>"+r.dice+" ("+r.sum+")</td><td class="+cls+">"+r.result+"</td></tr>"}).join("")}document.getElementById("search").addEventListener("input",()=>{render("md5");render("tx")});function clearAll(){rows.md5=[];rows.tx=[];render("md5");render("tx")}</script></body></html>';
-
 export default {
   async fetch(request, env) {
     const id = env.TAIXIU.idFromName('singleton');
@@ -202,9 +200,9 @@ export class TaiXiuDO {
     this.state = state;
     this.env = env;
     this.sessions = { md5: [], tx: [] };
-    this.pending = { md5: null, tx: null };
+    this.pending  = { md5: null, tx: null };
     this.clients = new Set();
-    this.gameWs = null;
+    this.gameWs  = null;
     this.sessionSeq = 0;
     this.lastMessageAt = null;
     this.lastConnectedAt = null;
@@ -216,17 +214,17 @@ export class TaiXiuDO {
     this.totalReconnects = 0;
     this.cooldownUntil = 0;
     this.currentMd5MatchId = '???';
-    this.currentTxMatchId = '???';
+    this.currentTxMatchId  = '???';
     this.currentReqId = 6;
     this.startedAt = Date.now();
 
     this.state.blockConcurrencyWhile(async () => {
       this.sessions.md5 = (await this.state.storage.get('md5')) || [];
-      this.sessions.tx = (await this.state.storage.get('tx')) || [];
-      this.pending.md5 = (await this.state.storage.get('pending_md5')) || null;
-      this.pending.tx = (await this.state.storage.get('pending_tx')) || null;
+      this.sessions.tx  = (await this.state.storage.get('tx'))  || [];
+      this.pending.md5  = (await this.state.storage.get('pending_md5')) || null;
+      this.pending.tx   = (await this.state.storage.get('pending_tx'))  || null;
       this.currentMd5MatchId = (await this.state.storage.get('cur_md5')) || '???';
-      this.currentTxMatchId = (await this.state.storage.get('cur_tx')) || '???';
+      this.currentTxMatchId  = (await this.state.storage.get('cur_tx'))  || '???';
 
       await this.connectGame();
       await this.state.storage.setAlarm(Date.now() + SUPERVISOR_INTERVAL_MS);
@@ -282,9 +280,7 @@ export class TaiXiuDO {
       ws.addEventListener('message', (ev) => {
         if (seq !== this.sessionSeq) return;
         this.lastMessageAt = Date.now();
-        try {
-          this.handleGameMessage(ev.data, seq);
-        } catch {}
+        try { this.handleGameMessage(ev.data, seq); } catch {}
       });
 
       ws.addEventListener('close', () => {
@@ -303,9 +299,7 @@ export class TaiXiuDO {
       });
 
       ws.addEventListener('error', () => {
-        try {
-          ws.close();
-        } catch {}
+        try { ws.close(); } catch {}
       });
 
       this.sendToGame(HANDSHAKE_BUF);
@@ -318,19 +312,12 @@ export class TaiXiuDO {
 
   sendToGame(buf) {
     if (!this.gameWs) return false;
-    try {
-      this.gameWs.send(buf);
-      return true;
-    } catch {
-      return false;
-    }
+    try { this.gameWs.send(buf); return true; } catch { return false; }
   }
 
   forceCloseGame() {
     if (this.gameWs) {
-      try {
-        this.gameWs.close();
-      } catch {}
+      try { this.gameWs.close(); } catch {}
       this.gameWs = null;
     }
   }
@@ -506,15 +493,17 @@ export class TaiXiuDO {
       server.send(JSON.stringify({
         event: 'init',
         md5: this.sessions.md5.slice(0, MAX_HISTORY),
-        tx: this.sessions.tx.slice(0, MAX_HISTORY)
+        tx:  this.sessions.tx.slice(0, MAX_HISTORY)
       }));
 
       return new Response(null, { status: 101, webSocket: client });
     }
 
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      return new Response(HTML_PAGE, {
-        headers: { 'content-type': 'text/html; charset=utf-8' }
+      return Response.json({
+        ok: true,
+        service: 'TAIXIU_REALTIME_API',
+        endpoints: ['/ws', '/api/status', '/api/md5', '/api/tx', '/api/all']
       });
     }
 
