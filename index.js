@@ -5,7 +5,6 @@
 const WSS_URL = 'https://koay56bcni5e0mk.cq.qnwxdhwica.com/';
 const MAX_HISTORY = 50;
 
-// Supervisor / heartbeat
 const SUPERVISOR_INTERVAL_MS   = 15000;
 const STALE_OPEN_TIMEOUT_MS    = 60000;
 const WATCHDOG_TIMEOUT_MS      = 3 * 60 * 1000;
@@ -18,7 +17,6 @@ const FAILURE_COOLDOWN_MS      = 5 * 60 * 1000;
 
 const DEBUG_ALL_MESSAGES = false;
 
-// ==== HEX PAYLOADS (giữ nguyên từ code gốc) ====
 const HANDSHAKE_HEX   = "010000727b22737973223a7b22706c6174666f726d223a226a732d776562736f636b6574222c22636c69656e744275696c644e756d626572223a22302e302e31222c22636c69656e7456657273696f6e223a223061323134383164373436663932663834323865316236646565623736666561227d7d";
 const LOGIN_HEX       = "0400004d01040001080210ca011a40373537626233613938353539346563356133303764333537343666366565626138356432373862336536373634343061626265393239383531316535393537624200";
 const JOIN_ROOM_HEX   = "040000250005226d6e6d6473622e6d6e6d64736268616e646c65722e656e74657267616d65726f6f6d";
@@ -31,9 +29,6 @@ const JOIN_ROOM_BUF = hexToBytes(JOIN_ROOM_HEX);
 const JOIN_TX_BUF   = hexToBytes(JOIN_TX_HEX);
 const HEARTBEAT_BUF = new Uint8Array([0x03, 0x00, 0x00, 0x00]);
 
-// ============================================================
-//  HELPERS
-// ============================================================
 function hexToBytes(hex) {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
@@ -64,9 +59,6 @@ function formatSession(s) {
   };
 }
 
-// ============================================================
-//  PROTOBUF DECODER (bản nhẹ, chạy trong Workers)
-// ============================================================
 function decodeRawProtobuf(buffer) {
   let offset = 0;
   const result = {};
@@ -108,13 +100,6 @@ function decodeRawProtobuf(buffer) {
   return result;
 }
 
-// MD5 bằng Web Crypto
-async function md5Hex(str) {
-  // Web Crypto không có MD5 — dùng pure JS MD5 fallback
-  return md5Fallback(str);
-}
-
-// MD5 thuần JS (không cần crypto module)
 function md5Fallback(s) {
   function cmn(q, a, b, x, s, t) {
     a = (((a + q) | 0) + ((x + t) | 0)) | 0;
@@ -124,7 +109,6 @@ function md5Fallback(s) {
   function gg(a,b,c,d,x,s,t){return cmn((b&d)|(c&(~d)),a,b,x,s,t);}
   function hh(a,b,c,d,x,s,t){return cmn(b^c^d,a,b,x,s,t);}
   function ii(a,b,c,d,x,s,t){return cmn(c^(b|(~d)),a,b,x,s,t);}
-  function sb(n,c){return (n<<c)|(n>>>(32-c));}
   function hex(n){let s='',j;for(j=0;j<=3;j++)s+=((n>>>(j*8+4))&0x0F).toString(16)+((n>>>(j*8))&0x0F).toString(16);return s;}
   function str2blks(str){
     let nblk=((str.length+8)>>6)+1, blks=new Array(nblk*16), i;
@@ -175,545 +159,6 @@ function md5Fallback(s) {
   return hex(a)+hex(b)+hex(c)+hex(d);
 }
 
-// ============================================================
-//  ENTRY POINT (Worker)
-// ============================================================
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-
-    // Tất cả request đều route vào 1 DO duy nhất (singleton)
-    const id = env.TAIXIU.idFromName('singleton');
-    const stub = env.TAIXIU.get(id);
-    return stub.fetch(request);
-  }
-};
-
-// ============================================================
-//  DURABLE OBJECT — GIỮ KẾT NỐI + SERVING
-// ============================================================
-export class TaiXiuDO {
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-
-    this.sessions = { md5: [], tx: [] };
-    this.pending  = { md5: null, tx: null };
-
-    this.clients = new Set();       // browser WebSocket clients
-    this.gameWs  = null;            // WS tới server game
-    this.sessionSeq = 0;
-
-    this.lastMessageAt = null;
-    this.lastConnectedAt = null;
-    this.lastDisconnectedAt = null;
-    this.lastLoginAt = null;
-    this.lastHeartbeatAt = null;
-
-    this.reconnectAttempts = 0;
-    this.consecutiveFailures = 0;
-    this.totalReconnects = 0;
-    this.cooldownUntil = 0;
-    this.currentMd5MatchId = '???';
-    this.currentTxMatchId  = '???';
-    this.currentReqId = 6;
-    this.startedAt = Date.now();
-
-    // Load state từ storage
-    this.state.blockConcurrencyWhile(async () => {
-      this.sessions.md5 = (await this.state.storage.get('md5')) || [];
-      this.sessions.tx  = (await this.state.storage.get('tx'))  || [];
-      this.pending.md5  = (await this.state.storage.get('pending_md5')) || null;
-      this.pending.tx   = (await this.state.storage.get('pending_tx'))  || null;
-      this.currentMd5MatchId = (await this.state.storage.get('cur_md5')) || '???';
-      this.currentTxMatchId  = (await this.state.storage.get('cur_tx'))  || '???';
-
-      // Bắt đầu kết nối
-      await this.connectGame();
-      // Bật alarm supervisor
-      await this.state.storage.setAlarm(Date.now() + SUPERVISOR_INTERVAL_MS);
-    });
-  }
-
-  // ============================================================
-  //  ALARM — thay thế setInterval
-  // ============================================================
-  async alarm() {
-    const now = Date.now();
-
-    try {
-      // 1. Socket không tồn tại hoặc đã chết → reconnect
-      if (!this.gameWs) {
-        console.log('👁 Alarm: no gameWs → reconnect');
-        await this.scheduleReconnect(0);
-        return;
-      }
-
-      // 2. OPEN nhưng idle quá lâu → terminate
-      if (this.lastMessageAt && now - this.lastMessageAt > STALE_OPEN_TIMEOUT_MS) {
-        console.log(`👁 Alarm: idle ${Math.floor((now - this.lastMessageAt)/1000)}s → close`);
-        this.forceCloseGame();
-        await this.scheduleReconnect(0);
-        return;
-      }
-
-      // 3. Watchdog nặng
-      if (this.lastMessageAt && now - this.lastMessageAt > WATCHDOG_TIMEOUT_MS) {
-        console.log('👁 Alarm: watchdog kill');
-        this.forceCloseGame();
-        await this.scheduleReconnect(0);
-        return;
-      }
-
-      // 4. Re-login định kỳ
-      if (this.lastLoginAt && now - this.lastLoginAt > RELOGIN_INTERVAL_MS) {
-        this.sendToGame(LOGIN_BUF);
-        this.lastLoginAt = now;
-        console.log('🔁 Re-login định kỳ');
-      }
-
-      // 5. Heartbeat cấp game (giữ NAT + auth)
-      if (this.lastHeartbeatAt === null || now - this.lastHeartbeatAt >= 10000) {
-        this.sendToGame(HEARTBEAT_BUF);
-        this.lastHeartbeatAt = now;
-      }
-    } catch (e) {
-      console.error('alarm error:', e.message);
-    } finally {
-      // Luôn schedule alarm kế tiếp
-      await this.state.storage.setAlarm(Date.now() + SUPERVISOR_INTERVAL_MS);
-    }
-  }
-
-  // ============================================================
-  //  KẾT NỐI TỚI SERVER GAME
-  // ============================================================
-  async connectGame() {
-    this.sessionSeq++;
-    const seq = this.sessionSeq;
-    this.lastConnectedAt = Date.now();
-    this.lastMessageAt = Date.now();
-
-    try {
-      // Cloudflare: KHÔNG cho custom Origin/User-Agent → dùng mặc định của CF
-      const res = await fetch(WSS_URL, {
-        headers: { 'Upgrade': 'websocket' }
-      });
-
-      const ws = res.webSocket;
-      if (!ws) throw new Error('No webSocket in response');
-      ws.accept();
-
-      this.gameWs = ws;
-      console.log(`✅ [Session ${seq}] Game WS connected`);
-
-      ws.addEventListener('message', (ev) => {
-        if (seq !== this.sessionSeq) return;
-        this.lastMessageAt = Date.now();
-        try {
-          this.handleGameMessage(ev.data, seq);
-        } catch (e) {
-          console.error('handleGameMessage:', e.message);
-        }
-      });
-
-      ws.addEventListener('close', (ev) => {
-        if (seq !== this.sessionSeq) return;
-        const lived = Date.now() - this.lastConnectedAt;
-        console.log(`🔴 [Session ${seq}] closed after ${(lived/1000).toFixed(1)}s code=${ev.code}`);
-        this.lastDisconnectedAt = Date.now();
-        this.gameWs = null;
-        this.lastHeartbeatAt = null;
-
-        if (lived > STABLE_CONNECTION_MS) {
-          this.reconnectAttempts = 0;
-          this.consecutiveFailures = 0;
-        } else {
-          this.consecutiveFailures++;
-        }
-        this.scheduleReconnect();
-      });
-
-      ws.addEventListener('error', (ev) => {
-        console.error(`❌ [Session ${seq}] ws error:`, ev.message || 'unknown');
-        try { ws.close(); } catch {}
-      });
-
-      // Gửi handshake
-      this.sendToGame(HANDSHAKE_BUF);
-    } catch (e) {
-      console.error('connectGame fail:', e.message);
-      this.gameWs = null;
-      this.consecutiveFailures++;
-      this.scheduleReconnect();
-    }
-  }
-
-  sendToGame(buf) {
-    if (!this.gameWs) return false;
-    try {
-      this.gameWs.send(buf);
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  forceCloseGame() {
-    if (this.gameWs) {
-      try { this.gameWs.close(); } catch {}
-      this.gameWs = null;
-    }
-  }
-
-  async scheduleReconnect(minDelay = null) {
-    const now = Date.now();
-
-    if (this.cooldownUntil > now) {
-      await this.state.storage.setAlarm(this.cooldownUntil);
-      return;
-    }
-
-    if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-      this.cooldownUntil = now + FAILURE_COOLDOWN_MS;
-      this.consecutiveFailures = 0;
-      console.log(`🛑 Cooldown ${FAILURE_COOLDOWN_MS/60000} phút`);
-      await this.state.storage.setAlarm(this.cooldownUntil);
-      return;
-    }
-
-    const base = Math.min(RECONNECT_MIN_MS * Math.pow(2, this.reconnectAttempts), RECONNECT_MAX_MS);
-    const jitter = Math.floor(Math.random() * 3000);
-    const delay = minDelay !== null ? minDelay : base + jitter;
-
-    this.reconnectAttempts++;
-    this.totalReconnects++;
-
-    console.log(`🔄 Reconnect sau ${(delay/1000).toFixed(1)}s (lần ${this.reconnectAttempts})`);
-    await this.state.storage.setAlarm(Date.now() + delay);
-  }
-
-  // ============================================================
-  //  XỬ LÝ MESSAGE TỪ SERVER GAME
-  // ============================================================
-  async handleGameMessage(raw, seq) {
-    if (seq !== this.sessionSeq) return;
-
-    // raw có thể là ArrayBuffer hoặc string
-    let data;
-    if (raw instanceof ArrayBuffer) {
-      data = new Uint8Array(raw);
-    } else if (raw instanceof Uint8Array) {
-      data = raw;
-    } else if (typeof raw === 'string') {
-      // game server gửi text — bỏ qua
-      return;
-    } else {
-      return;
-    }
-    if (data.length === 0) return;
-
-    if (DEBUG_ALL_MESSAGES) {
-      console.log(`📥 ${data.length}B type=0x${data[0].toString(16)}`);
-    }
-
-    const type = data[0];
-
-    if (type === 1) {
-      console.log('📩 Handshake OK');
-      this.sendToGame(HANDSHAKE_ACK_BUF);
-      this.sendToGame(LOGIN_BUF);
-      this.lastLoginAt = Date.now();
-
-      // Vào bàn MD5 sau 1.5s
-      setTimeout(() => this.sendToGame(JOIN_ROOM_BUF), 1500);
-      // Vào bàn TX sau 3s
-      setTimeout(() => this.sendToGame(JOIN_TX_BUF), 3000);
-
-      return;
-    }
-
-    if (type === 3) return; // pong
-
-    if (type !== 4) return;
-
-    const payload = data.slice(4);
-    if (payload.length === 0) return;
-
-    let offset = 0;
-    const flag = payload[offset++];
-    const msgType = (flag >> 1) & 0x07;
-    const compressRoute = flag & 0x01;
-
-    if (msgType === 0 || msgType === 2) {
-      let m = 0;
-      do { m = payload[offset++]; } while (m >= 128);
-    }
-
-    let route = '';
-    if (msgType === 0 || msgType === 1 || msgType === 3) {
-      if (compressRoute) {
-        route = 'RouteCode_' + ((payload[offset] << 8) | payload[offset + 1]);
-        offset += 2;
-      } else {
-        const routeLen = payload[offset++];
-        route = new TextDecoder().decode(payload.slice(offset, offset + routeLen));
-        offset += routeLen;
-      }
-    }
-
-    if (!route || route === 'broadhallmessage' || route === 'mnsbuserbet' || route === 'mnmdsbuserbet') return;
-
-    const prefix = route.includes('mnmdsb') ? '[MD5]'
-                 : (route.includes('mnsb') || route.includes('mnshaibao') ? '[THƯỜNG]' : '');
-
-    const protobufData = payload.slice(offset);
-    const decoded = decodeRawProtobuf(protobufData);
-
-    for (const key in decoded) {
-      const value = decoded[key];
-
-      // --- MD5 game start ---
-      if (route === 'mnmdsbgamestart' && key === '2') {
-        this.currentMd5MatchId = decoded[1] ? (Number(decoded[1]) / 2) : '???';
-        await this.savePending('md5', { matchId: this.currentMd5MatchId, md5: value, time: Date.now() });
-        await this.state.storage.put('cur_md5', this.currentMd5MatchId);
-        console.log(`🟢 ${prefix} START #${this.currentMd5MatchId}`);
-        continue;
-      }
-
-      // --- MD5 game end ---
-      if (route.includes('mnmdsb') && typeof value === 'string' && value.includes('{') && value.includes('}')) {
-        const matchId = this.currentMd5MatchId;
-        const md5hash = md5Fallback(value);
-        const m = value.match(/\{(\d+-\d+-\d+)\}/);
-        if (m) {
-          const dice = m[1].split('-');
-          const sum = parseInt(dice[0]) + parseInt(dice[1]) + parseInt(dice[2]);
-          const tx = sum >= 11 ? 'TÀI' : 'XỈU';
-          console.log(`🔴 ${prefix} END #${matchId} 🎲${m[1]} (${sum}:${tx})`);
-          await this.saveEnd('md5', {
-            matchId, dice: m[1], sum, result: tx, md5: md5hash, time: Date.now()
-          });
-        }
-      }
-
-      // --- TX game start ---
-      if (route === 'mnsbgamestart') {
-        const nextId = this.currentTxMatchId !== '???'
-          ? Number(this.currentTxMatchId) + 1 : '???';
-        await this.savePending('tx', { matchId: nextId, time: Date.now() });
-        console.log(`🟢 ${prefix} START #${nextId}`);
-        break;
-      }
-
-      // --- TX game end ---
-      if (route === 'mnsbgameend' && key === '1_hex') {
-        if (value.length === 6) {
-          const matchId = decoded[5] || '???';
-          this.currentTxMatchId = matchId;
-          const d1 = parseInt(value.substring(0, 2), 16) / 2;
-          const d2 = parseInt(value.substring(2, 4), 16) / 2;
-          const d3 = parseInt(value.substring(4, 6), 16) / 2;
-          const sum = d1 + d2 + d3;
-          const tx = sum >= 11 ? 'TÀI' : 'XỈU';
-          console.log(`🔴 ${prefix} END #${matchId} 🎲${d1}-${d2}-${d3} (${sum}:${tx})`);
-          await this.saveEnd('tx', {
-            matchId, dice: `${d1}-${d2}-${d3}`, sum, result: tx, md5: null, time: Date.now()
-          });
-          await this.state.storage.put('cur_tx', matchId);
-        }
-      }
-    }
-
-    // Re-join room sau khi game end
-    if (route.endsWith('gameend')) {
-      setTimeout(() => {
-        if (seq !== this.sessionSeq) return;
-        this.currentReqId++;
-        if (this.currentReqId > 127) this.currentReqId = 5;
-        if (route.includes('mnmdsb')) {
-          JOIN_ROOM_BUF[5] = this.currentReqId;
-          this.sendToGame(JOIN_ROOM_BUF);
-        } else {
-          JOIN_TX_BUF[5] = this.currentReqId;
-          this.sendToGame(JOIN_TX_BUF);
-        }
-      }, 2000);
-    }
-  }
-
-  // ============================================================
-  //  LƯU SESSION + BROADCAST BROWSER CLIENTS
-  // ============================================================
-  async savePending(type, data) {
-    this.pending[type] = data;
-    await this.state.storage.put(`pending_${type}`, data);
-    this.broadcast({ event: 'result', type, data: { status: 'START', ...data } });
-  }
-
-  async saveEnd(type, data) {
-    this.sessions[type].unshift(data);
-    if (this.sessions[type].length > MAX_HISTORY) this.sessions[type].pop();
-    this.pending[type] = null;
-    await this.state.storage.put(type, this.sessions[type]);
-    await this.state.storage.put(`pending_${type}`, null);
-    this.broadcast({ event: 'result', type, data: { status: 'END', ...data } });
-  }
-
-  broadcast(obj) {
-    const msg = JSON.stringify(obj);
-    for (const c of this.clients) {
-      try { c.send(msg); } catch {}
-    }
-  }
-
-  // ============================================================
-  //  FETCH — API + WebSocket upgrade
-  // ============================================================
-  async fetch(request) {
-    const url = new URL(request.url);
-
-    // --- WebSocket upgrade cho browser ---
-    if (request.headers.get('Upgrade') === 'websocket') {
-      const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
-      server.accept();
-      this.clients.add(server);
-
-      server.addEventListener('close', () => this.clients.delete(server));
-      server.addEventListener('error', () => this.clients.delete(server));
-      server.addEventListener('message', () => {});
-
-      // Gửi init
-      server.send(JSON.stringify({
-        event: 'init',
-        md5: this.sessions.md5.slice(0, MAX_HISTORY),
-        tx:  this.sessions.tx.slice(0, MAX_HISTORY)
-      }));
-
-      return new Response(null, { status: 101, webSocket: client });
-    }
-
-    // --- API routes ---
-    if (url.pathname === '/' || url.pathname === '/index.html') {
-      return new Response(HTML_PAGE, {
-        headers: { 'content-type': 'text/html; charset=utf-8' }
-      });
-    }
-
-    if (url.pathname === '/api/status') {
-      const now = Date.now();
-      const connDur = this.lastConnectedAt && (!this.lastDisconnectedAt || this.lastConnectedAt > this.lastDisconnectedAt)
-        ? Math.floor((now - this.lastConnectedAt) / 1000) : 0;
-      return Response.json({
-        ok: true,
-        wsState: this.gameWs ? 1 : 0,
-        wsStateText: this.gameWs ? 'OPEN' : 'CLOSED',
-        sessionSeq: this.sessionSeq,
-        reconnectAttempts: this.reconnectAttempts,
-        consecutiveFailures: this.consecutiveFailures,
-        totalReconnects: this.totalReconnects,
-        lastConnectedAt: this.lastConnectedAt,
-        lastDisconnectedAt: this.lastDisconnectedAt,
-        connectionDurationSec: connDur,
-        lastMessageAgoSec: this.lastMessageAt ? Math.floor((now - this.lastMessageAt) / 1000) : null,
-        lastLoginAt: this.lastLoginAt,
-        clients: this.clients.size,
-        uptimeSec: Math.floor((now - this.startedAt) / 1000),
-        stats: {
-          md5: { stored: this.sessions.md5.length, pending: !!this.pending.md5 },
-          tx:  { stored: this.sessions.tx.length,  pending: !!this.pending.tx  }
-        }
-      });
-    }
-
-    if (url.pathname === '/api/md5' || url.pathname === '/api/tx') {
-      const type = url.pathname === '/api/md5' ? 'md5' : 'tx';
-      let limit = parseInt(url.searchParams.get('limit')) || MAX_HISTORY;
-      limit = Math.min(Math.max(limit, 1), MAX_HISTORY);
-
-      let list = this.sessions[type];
-      const fid = url.searchParams.get('matchId');
-      if (fid) list = list.filter(s => String(s.matchId).includes(fid));
-      const fres = url.searchParams.get('result');
-      if (fres) {
-        const r = fres.toUpperCase();
-        if (r === 'TAI' || r === 'TÀI') list = list.filter(s => s.result === 'TÀI');
-        else if (r === 'XIU' || r === 'XỈU') list = list.filter(s => s.result === 'XỈU');
-      }
-
-      const sliced = list.slice(0, limit);
-      const latest = this.sessions[type][0] || null;
-      return Response.json({
-        ok: true, table: type,
-        tableName: type === 'md5' ? 'TÀI XỈU MD5' : 'TÀI XỈU THƯỜNG',
-        updatedAt: new Date().toISOString(),
-        pending: this.pending[type],
-        latest: latest ? formatSession(latest) : null,
-        stats: calcStats(this.sessions[type], 20),
-        totalStored: this.sessions[type].length,
-        count: sliced.length,
-        data: sliced.map(formatSession)
-      });
-    }
-
-    if (url.pathname === '/api/all') {
-      return Response.json({
-        ok: true,
-        updatedAt: new Date().toISOString(),
-        md5: {
-          pending: this.pending.md5,
-          latest: this.sessions.md5[0] ? formatSession(this.sessions.md5[0]) : null,
-          stats: calcStats(this.sessions.md5, 20),
-          data: this.sessions.md5.slice(0, 20).map(formatSession)
-        },
-        tx: {
-          pending: this.pending.tx,
-          latest: this.sessions.tx[0] ? formatSession(this.sessions.tx[0]) : null,
-          stats: calcStats(this.sessions.tx, 20),
-          data: this.sessions.tx.slice(0, 20).map(formatSession)
-        }
-      });
-    }
-
-    if (url.pathname === '/api/signal') {
-      const predict = (s) => {
-        if (s.sampleSize < 5) return 'CHỜ THÊM DỮ LIỆU';
-        if (s.taiPercent >= 60) return 'XỈU';
-        if (s.xiuPercent >= 60) return 'TÀI';
-        return 'BÌNH THƯỜNG';
-      };
-      const md5Stats = calcStats(this.sessions.md5, 20);
-      const txStats = calcStats(this.sessions.tx, 20);
-      const md5Latest = this.sessions.md5[0] || null;
-      const txLatest = this.sessions.tx[0] || null;
-      return Response.json({
-        ok: true, updatedAt: new Date().toISOString(),
-        md5: {
-          latestResult: md5Latest?.result || null,
-          latestDice: md5Latest?.dice || null,
-          latestSum: md5Latest?.sum || null,
-          pendingMatchId: this.pending.md5?.matchId || null,
-          prediction: predict(md5Stats), stats20: md5Stats
-        },
-        tx: {
-          latestResult: txLatest?.result || null,
-          latestDice: txLatest?.dice || null,
-          latestSum: txLatest?.sum || null,
-          pendingMatchId: this.pending.tx?.matchId || null,
-          prediction: predict(txStats), stats20: txStats
-        }
-      });
-    }
-
-    return new Response('Not found', { status: 404 });
-  }
-}
-
-// ============================================================
-//  HTML PAGE (giữ nguyên UI từ code gốc)
-// ============================================================
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -877,4 +322,344 @@ const HTML_PAGE = `<!DOCTYPE html>
   function clearAll() { rows.md5 = []; rows.tx = []; render('md5'); render('tx'); }
 </script>
 </body>
-</html>
+</html>`;
+
+export default {
+  async fetch(request, env) {
+    const id = env.TAIXIU.idFromName('singleton');
+    const stub = env.TAIXIU.get(id);
+    return stub.fetch(request);
+  }
+};
+
+export class TaiXiuDO {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sessions = { md5: [], tx: [] };
+    this.pending  = { md5: null, tx: null };
+    this.clients = new Set();
+    this.gameWs  = null;
+    this.sessionSeq = 0;
+    this.lastMessageAt = null;
+    this.lastConnectedAt = null;
+    this.lastDisconnectedAt = null;
+    this.lastLoginAt = null;
+    this.lastHeartbeatAt = null;
+    this.reconnectAttempts = 0;
+    this.consecutiveFailures = 0;
+    this.totalReconnects = 0;
+    this.cooldownUntil = 0;
+    this.currentMd5MatchId = '???';
+    this.currentTxMatchId  = '???';
+    this.currentReqId = 6;
+    this.startedAt = Date.now();
+
+    this.state.blockConcurrencyWhile(async () => {
+      this.sessions.md5 = (await this.state.storage.get('md5')) || [];
+      this.sessions.tx  = (await this.state.storage.get('tx'))  || [];
+      this.pending.md5  = (await this.state.storage.get('pending_md5')) || null;
+      this.pending.tx   = (await this.state.storage.get('pending_tx'))  || null;
+      this.currentMd5MatchId = (await this.state.storage.get('cur_md5')) || '???';
+      this.currentTxMatchId  = (await this.state.storage.get('cur_tx'))  || '???';
+
+      await this.connectGame();
+      await this.state.storage.setAlarm(Date.now() + SUPERVISOR_INTERVAL_MS);
+    });
+  }
+
+  async alarm() {
+    const now = Date.now();
+    try {
+      if (!this.gameWs) {
+        await this.scheduleReconnect(0);
+        return;
+      }
+      if (this.lastMessageAt && now - this.lastMessageAt > STALE_OPEN_TIMEOUT_MS) {
+        this.forceCloseGame();
+        await this.scheduleReconnect(0);
+        return;
+      }
+      if (this.lastMessageAt && now - this.lastMessageAt > WATCHDOG_TIMEOUT_MS) {
+        this.forceCloseGame();
+        await this.scheduleReconnect(0);
+        return;
+      }
+      if (this.lastLoginAt && now - this.lastLoginAt > RELOGIN_INTERVAL_MS) {
+        this.sendToGame(LOGIN_BUF);
+        this.lastLoginAt = now;
+      }
+      if (this.lastHeartbeatAt === null || now - this.lastHeartbeatAt >= 10000) {
+        this.sendToGame(HEARTBEAT_BUF);
+        this.lastHeartbeatAt = now;
+      }
+    } catch (e) {
+      console.error('alarm error:', e.message);
+    } finally {
+      await this.state.storage.setAlarm(Date.now() + SUPERVISOR_INTERVAL_MS);
+    }
+  }
+
+  async connectGame() {
+    this.sessionSeq++;
+    const seq = this.sessionSeq;
+    this.lastConnectedAt = Date.now();
+    this.lastMessageAt = Date.now();
+
+    try {
+      const res = await fetch(WSS_URL, { headers: { 'Upgrade': 'websocket' } });
+      const ws = res.webSocket;
+      if (!ws) throw new Error('No webSocket');
+      ws.accept();
+
+      this.gameWs = ws;
+
+      ws.addEventListener('message', (ev) => {
+        if (seq !== this.sessionSeq) return;
+        this.lastMessageAt = Date.now();
+        try { this.handleGameMessage(ev.data, seq); } catch (e) {}
+      });
+
+      ws.addEventListener('close', () => {
+        if (seq !== this.sessionSeq) return;
+        const lived = Date.now() - this.lastConnectedAt;
+        this.lastDisconnectedAt = Date.now();
+        this.gameWs = null;
+        this.lastHeartbeatAt = null;
+        if (lived > STABLE_CONNECTION_MS) {
+          this.reconnectAttempts = 0;
+          this.consecutiveFailures = 0;
+        } else {
+          this.consecutiveFailures++;
+        }
+        this.scheduleReconnect();
+      });
+
+      ws.addEventListener('error', () => {
+        try { ws.close(); } catch {}
+      });
+
+      this.sendToGame(HANDSHAKE_BUF);
+    } catch (e) {
+      this.gameWs = null;
+      this.consecutiveFailures++;
+      this.scheduleReconnect();
+    }
+  }
+
+  sendToGame(buf) {
+    if (!this.gameWs) return false;
+    try { this.gameWs.send(buf); return true; } catch (e) { return false; }
+  }
+
+  forceCloseGame() {
+    if (this.gameWs) {
+      try { this.gameWs.close(); } catch {}
+      this.gameWs = null;
+    }
+  }
+
+  async scheduleReconnect(minDelay = null) {
+    const now = Date.now();
+    if (this.cooldownUntil > now) {
+      await this.state.storage.setAlarm(this.cooldownUntil);
+      return;
+    }
+    if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      this.cooldownUntil = now + FAILURE_COOLDOWN_MS;
+      this.consecutiveFailures = 0;
+      await this.state.storage.setAlarm(this.cooldownUntil);
+      return;
+    }
+    const base = Math.min(RECONNECT_MIN_MS * Math.pow(2, this.reconnectAttempts), RECONNECT_MAX_MS);
+    const jitter = Math.floor(Math.random() * 3000);
+    const delay = minDelay !== null ? minDelay : base + jitter;
+    this.reconnectAttempts++;
+    this.totalReconnects++;
+    await this.state.storage.setAlarm(Date.now() + delay);
+  }
+
+  async handleGameMessage(raw, seq) {
+    if (seq !== this.sessionSeq) return;
+    let data;
+    if (raw instanceof ArrayBuffer) data = new Uint8Array(raw);
+    else if (raw instanceof Uint8Array) data = raw;
+    else return;
+    if (data.length === 0) return;
+
+    const type = data[0];
+    if (type === 1) {
+      this.sendToGame(HANDSHAKE_ACK_BUF);
+      this.sendToGame(LOGIN_BUF);
+      this.lastLoginAt = Date.now();
+      setTimeout(() => this.sendToGame(JOIN_ROOM_BUF), 1500);
+      setTimeout(() => this.sendToGame(JOIN_TX_BUF), 3000);
+      return;
+    }
+    if (type !== 4) return;
+
+    const payload = data.slice(4);
+    if (payload.length === 0) return;
+
+    let offset = 0;
+    const flag = payload[offset++];
+    const msgType = (flag >> 1) & 0x07;
+    const compressRoute = flag & 0x01;
+
+    if (msgType === 0 || msgType === 2) {
+      let m = 0;
+      do { m = payload[offset++]; } while (m >= 128);
+    }
+
+    let route = '';
+    if (msgType === 0 || msgType === 1 || msgType === 3) {
+      if (compressRoute) {
+        route = 'RouteCode_' + ((payload[offset] << 8) | payload[offset + 1]);
+        offset += 2;
+      } else {
+        const routeLen = payload[offset++];
+        route = new TextDecoder().decode(payload.slice(offset, offset + routeLen));
+        offset += routeLen;
+      }
+    }
+
+    if (!route || route === 'broadhallmessage' || route === 'mnsbuserbet' || route === 'mnmdsbuserbet') return;
+
+    const protobufData = payload.slice(offset);
+    const decoded = decodeRawProtobuf(protobufData);
+
+    for (const key in decoded) {
+      const value = decoded[key];
+
+      if (route === 'mnmdsbgamestart' && key === '2') {
+        this.currentMd5MatchId = decoded[1] ? (Number(decoded[1]) / 2) : '???';
+        await this.savePending('md5', { matchId: this.currentMd5MatchId, md5: value, time: Date.now() });
+        await this.state.storage.put('cur_md5', this.currentMd5MatchId);
+        continue;
+      }
+
+      if (route.includes('mnmdsb') && typeof value === 'string' && value.includes('{') && value.includes('}')) {
+        const matchId = this.currentMd5MatchId;
+        const md5hash = md5Fallback(value);
+        const m = value.match(/\{(\d+-\d+-\d+)\}/);
+        if (m) {
+          const dice = m[1].split('-');
+          const sum = parseInt(dice[0]) + parseInt(dice[1]) + parseInt(dice[2]);
+          const tx = sum >= 11 ? 'TÀI' : 'XỈU';
+          await this.saveEnd('md5', { matchId, dice: m[1], sum, result: tx, md5: md5hash, time: Date.now() });
+        }
+      }
+
+      if (route === 'mnsbgamestart') {
+        const nextId = this.currentTxMatchId !== '???' ? Number(this.currentTxMatchId) + 1 : '???';
+        await this.savePending('tx', { matchId: nextId, time: Date.now() });
+        break;
+      }
+
+      if (route === 'mnsbgameend' && key === '1_hex') {
+        if (value.length === 6) {
+          const matchId = decoded[5] || '???';
+          this.currentTxMatchId = matchId;
+          const d1 = parseInt(value.substring(0, 2), 16) / 2;
+          const d2 = parseInt(value.substring(2, 4), 16) / 2;
+          const d3 = parseInt(value.substring(4, 6), 16) / 2;
+          const sum = d1 + d2 + d3;
+          const tx = sum >= 11 ? 'TÀI' : 'XỈU';
+          await this.saveEnd('tx', { matchId, dice: `${d1}-${d2}-${d3}`, sum, result: tx, md5: null, time: Date.now() });
+          await this.state.storage.put('cur_tx', matchId);
+        }
+      }
+    }
+
+    if (route.endsWith('gameend')) {
+      setTimeout(() => {
+        if (seq !== this.sessionSeq) return;
+        this.currentReqId++;
+        if (this.currentReqId > 127) this.currentReqId = 5;
+        if (route.includes('mnmdsb')) {
+          JOIN_ROOM_BUF[5] = this.currentReqId;
+          this.sendToGame(JOIN_ROOM_BUF);
+        } else {
+          JOIN_TX_BUF[5] = this.currentReqId;
+          this.sendToGame(JOIN_TX_BUF);
+        }
+      }, 2000);
+    }
+  }
+
+  async savePending(type, data) {
+    this.pending[type] = data;
+    await this.state.storage.put(`pending_${type}`, data);
+    this.broadcast({ event: 'result', type, data: { status: 'START', ...data } });
+  }
+
+  async saveEnd(type, data) {
+    this.sessions[type].unshift(data);
+    if (this.sessions[type].length > MAX_HISTORY) this.sessions[type].pop();
+    this.pending[type] = null;
+    await this.state.storage.put(type, this.sessions[type]);
+    await this.state.storage.put(`pending_${type}`, null);
+    this.broadcast({ event: 'result', type, data: { status: 'END', ...data } });
+  }
+
+  broadcast(obj) {
+    const msg = JSON.stringify(obj);
+    for (const c of this.clients) {
+      try { c.send(msg); } catch {}
+    }
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/ws') {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+      this.clients.add(server);
+
+      server.addEventListener('close', () => this.clients.delete(server));
+      server.addEventListener('error', () => this.clients.delete(server));
+
+      server.send(JSON.stringify({
+        event: 'init',
+        md5: this.sessions.md5.slice(0, MAX_HISTORY),
+        tx:  this.sessions.tx.slice(0, MAX_HISTORY)
+      }));
+
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      return new Response(HTML_PAGE, {
+        headers: { 'content-type': 'text/html; charset=utf-8' }
+      });
+    }
+
+    if (url.pathname === '/api/status') {
+      const now = Date.now();
+      return Response.json({
+        ok: true,
+        wsState: this.gameWs ? 1 : 0,
+        wsStateText: this.gameWs ? 'OPEN' : 'CLOSED',
+        totalReconnects: this.totalReconnects,
+        lastMessageAgoSec: this.lastMessageAt ? Math.floor((now - this.lastMessageAt) / 1000) : null,
+        clients: this.clients.size,
+        stats: { md5: this.sessions.md5.length, tx: this.sessions.tx.length }
+      });
+    }
+
+    if (url.pathname === '/api/md5' || url.pathname === '/api/tx') {
+      const type = url.pathname === '/api/md5' ? 'md5' : 'tx';
+      return Response.json({
+        ok: true, table: type,
+        pending: this.pending[type],
+        latest: this.sessions[type][0] ? formatSession(this.sessions[type][0]) : null,
+        stats: calcStats(this.sessions[type], 20),
+        data: this.sessions[type].slice(0, MAX_HISTORY).map(formatSession)
+      });
+    }
+
+    return new Response('Not found', { status: 404 });
+  }
+         
