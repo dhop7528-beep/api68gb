@@ -187,170 +187,53 @@ function md5Fallback(s) {
   return hex(a) + hex(b) + hex(c) + hex(d);
 }
 
-const HTML_PAGE = `<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tài Xỉu Realtime</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: 'Segoe UI', Arial, sans-serif;
-    background: #0f172a; color: #e2e8f0; padding: 12px; }
-  h1 { text-align: center; font-size: 18px; margin: 0 0 8px; color: #38bdf8; }
-  .api-links { text-align: center; margin-bottom: 12px; font-size: 13px; }
-  .api-links a { color: #38bdf8; text-decoration: none; margin: 0 4px;
-    padding: 4px 10px; border: 1px solid #38bdf8; border-radius: 4px; display: inline-block; margin-bottom: 4px; }
-  .api-links a:hover { background: #38bdf8; color: #0f172a; }
-  .toolbar { text-align: center; margin-bottom: 12px; }
-  .toolbar input { background: #1e293b; border: 1px solid #334155; color: #e2e8f0;
-    padding: 8px 12px; border-radius: 6px; width: 180px; font-size: 14px; }
-  .toolbar button { background: #ef4444; color: white; border: none; padding: 8px 14px;
-    border-radius: 6px; cursor: pointer; margin-left: 6px; font-size: 14px; }
-  .status { text-align: center; margin-bottom: 12px; font-size: 12px; color: #94a3b8; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-    background: #22c55e; margin-right: 6px; animation: pulse 1.5s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 1400px; margin: 0 auto; }
-  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-  .panel { background: #1e293b; border-radius: 10px; overflow: hidden; border: 1px solid #334155; }
-  .panel h2 { margin: 0; padding: 10px; font-size: 14px; text-align: center; color: white; letter-spacing: 1px; }
-  .panel.md5 h2 { background: #8b5cf6; }
-  .panel.tx h2 { background: #f59e0b; }
-  .stats { display: flex; gap: 8px; padding: 8px 10px; background: #0f172a; font-size: 12px; }
-  .stats .item { flex: 1; text-align: center; padding: 4px; border-radius: 4px; background: #1e293b; }
-  .stats .item b { display: block; font-size: 14px; margin-top: 2px; }
-  .stats .tai b { color: #22c55e; }
-  .stats .xiu b { color: #ef4444; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td { padding: 8px; border-top: 1px solid #334155; }
-  tr.start td { color: #94a3b8; font-style: italic; }
-  tr.end.tai td { background: rgba(34,197,94,.10); }
-  tr.end.xiu td { background: rgba(239,68,68,.10); }
-  .tai { color: #22c55e; font-weight: bold; }
-  .xiu { color: #ef4444; font-weight: bold; }
-  .md5hash { font-family: monospace; font-size: 11px; color: #94a3b8; word-break: break-all; }
-  .dice { display: inline-block; background: #334155; border-radius: 4px; padding: 2px 6px;
-    font-family: monospace; font-weight: bold; margin-right: 2px; }
-  .empty { text-align: center; padding: 30px; color: #64748b; font-style: italic; }
-</style>
-</head>
-<body>
-  <h1>🎲 TÀI XỈU REALTIME (Cloudflare)</h1>
-  <div class="api-links">
-    <a href="/api/md5" target="_blank">/api/md5</a>
-    <a href="/api/tx" target="_blank">/api/tx</a>
-    <a href="/api/all" target="_blank">/api/all</a>
-    <a href="/api/signal" target="_blank">/api/signal</a>
-    <a href="/api/status" target="_blank">/api/status</a>
-  </div>
-  <div class="toolbar">
-    <input id="search" placeholder="Tìm mã phiên...">
-    <button onclick="clearAll()">🗑 Clear</button>
-  </div>
-  <div class="status"><span class="dot"></span><span id="conn">Đang kết nối...</span>
-    | MD5: <b id="countMd5">0</b> | Thường: <b id="countTx">0</b></div>
-
-  <div class="grid">
-    <div class="panel md5">
-      <h2>🔮 TÀI XỈU MD5</h2>
-      <div class="stats" id="statsMd5">
-        <div class="item tai">TÀI<b>-</b></div>
-        <div class="item xiu">XỈU<b>-</b></div>
-        <div class="item">Tỷ lệ<b>-</b></div>
-      </div>
-      <div style="max-height: 70vh; overflow-y: auto;">
-        <table><tbody id="bodyMd5"><tr><td class="empty">Chưa có dữ liệu...</td></tr></tbody></table>
-      </div>
-    </div>
-    <div class="panel tx">
-      <h2>💰 TÀI XỈU THƯỜNG</h2>
-      <div class="stats" id="statsTx">
-        <div class="item tai">TÀI<b>-</b></div>
-        <div class="item xiu">XỈU<b>-</b></div>
-        <div class="item">Tỷ lệ<b>-</b></div>
-      </div>
-      <div style="max-height: 70vh; overflow-y: auto;">
-        <table><tbody id="bodyTx"><tr><td class="empty">Chưa có dữ liệu...</td></tr></tbody></table>
-      </div>
-    </div>
-  </div>
-
-<script>
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  let ws;
-  const rows = { md5: [], tx: [] };
-
-  function connectWs() {
-    ws = new WebSocket(proto + '//' + location.host + '/ws');
-    ws.onopen = () => { document.getElementById('conn').textContent = 'Đang nhận realtime'; };
-    ws.onclose = () => {
-      document.getElementById('conn').textContent = 'Mất kết nối, thử lại...';
-      setTimeout(connectWs, 3000);
-    };
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.event === 'init') {
-        rows.md5 = msg.md5 || [];
-        rows.tx = msg.tx || [];
-        render('md5'); render('tx');
-        updateStats('md5'); updateStats('tx');
-      } else if (msg.event === 'result') {
-        const type = msg.type;
-        rows[type].unshift(msg.data);
-        if (rows[type].length > 50) rows[type].pop();
-        render(type);
-        updateStats(type);
-      }
-    };
-  }
-  connectWs();
-
-  function updateStats(type) {
-    const done = rows[type].filter(r => r.result).slice(0, 20);
-    let tai = 0, xiu = 0;
-    for (const s of done) {
-      if (s.result === 'TÀI') tai++;
-      else if (s.result === 'XỈU') xiu++;
-    }
-    const total = done.length;
-    const el = document.getElementById(type === 'md5' ? 'statsMd5' : 'statsTx');
-    el.querySelector('.tai b').textContent = tai;
-    el.querySelector('.xiu b').textContent = xiu;
-    el.querySelectorAll('.item b')[2].textContent =
-      total ? tai + '/' + xiu + ' (' + (tai/total*100).toFixed(0) + '% T)' : '-';
-  }
-
-  function render(type) {
-    const tbody = document.getElementById(type === 'md5' ? 'bodyMd5' : 'bodyTx');
-    const filter = document.getElementById('search').value.trim();
-    const list = filter ? rows[type].filter(r => String(r.matchId).includes(filter)) : rows[type];
-    document.getElementById(type === 'md5' ? 'countMd5' : 'countTx').textContent = rows[type].length;
-    if (list.length === 0) {
-      tbody.innerHTML = '<tr><td class="empty">Chưa có dữ liệu...</td></tr>';
-      return;
-    }
-    tbody.innerHTML = list.map(r => {
-      if (!r.result) {
-        return '<tr class="start"><td>#' + r.matchId + '</td><td>BẮT ĐẦU</td>' +
-          '<td colspan="3">' + (r.md5 ? 'MD5: ' + r.md5.substring(0,20) + '...' : 'Đang chờ kết quả...') + '</td></tr>';
-      }
-      const cls = r.result === 'TÀI' ? 'tai' : 'xiu';
-      const d = (r.dice || '0-0-0').split('-');
-      return '<tr class="end ' + cls + '">' +
-        '<td><b>#' + r.matchId + '</b></td>' +
-        '<td><span class="dice">' + d[0] + '</span><span class="dice">' + d[1] + '</span><span class="dice">' + d[2] + '</span></td>' +
-        '<td>' + r.sum + '</td>' +
-        '<td class="' + cls + '">' + r.result + '</td>' +
-        '<td class="md5hash">' + (r.md5 ? r.md5.substring(0,16) + '...' : '') + '</td></tr>';
-    }).join('');
-  }
-
-  document.getElementById('search').addEventListener('input', () => { render('md5'); render('tx'); });
-  function clearAll() { rows.md5 = []; rows.tx = []; render('md5'); render('tx'); }
-</script>
-</body>
-</html>`;
+function getHtmlPage() {
+  return [
+    '<!DOCTYPE html>',
+    '<html lang="vi"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
+    '<title>Tai Xiu Realtime</title>',
+    '<style>',
+    '*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#0f172a;color:#e2e8f0;padding:12px}',
+    'h1{text-align:center;font-size:18px;margin:0 0 8px;color:#38bdf8}',
+    '.api-links{text-align:center;margin-bottom:12px;font-size:13px}',
+    '.api-links a{color:#38bdf8;text-decoration:none;margin:0 4px;padding:4px 10px;border:1px solid #38bdf8;border-radius:4px;display:inline-block;margin-bottom:4px}',
+    '.toolbar{text-align:center;margin-bottom:12px}',
+    '.toolbar input{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:8px 12px;border-radius:6px;width:180px;font-size:14px}',
+    '.toolbar button{background:#ef4444;color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;margin-left:6px;font-size:14px}',
+    '.status{text-align:center;margin-bottom:12px;font-size:12px;color:#94a3b8}',
+    '.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:1400px;margin:0 auto}',
+    '@media(max-width:900px){.grid{grid-template-columns:1fr}}',
+    '.panel{background:#1e293b;border-radius:10px;overflow:hidden;border:1px solid #334155}',
+    '.panel h2{margin:0;padding:10px;font-size:14px;text-align:center;color:#fff}',
+    '.panel.md5 h2{background:#8b5cf6}.panel.tx h2{background:#f59e0b}',
+    '.stats{display:flex;gap:8px;padding:8px 10px;background:#0f172a;font-size:12px}',
+    '.stats .item{flex:1;text-align:center;padding:4px;border-radius:4px;background:#1e293b}',
+    '.stats .item b{display:block;font-size:14px;margin-top:2px}',
+    '.stats .tai b{color:#22c55e}.stats .xiu b{color:#ef4444}',
+    'table{width:100%;border-collapse:collapse;font-size:13px}td{padding:8px;border-top:1px solid #334155}',
+    '.tai{color:#22c55e;font-weight:bold}.xiu{color:#ef4444;font-weight:bold}',
+    '.dice{display:inline-block;background:#334155;border-radius:4px;padding:2px 6px;font-family:monospace;font-weight:bold;margin-right:2px}',
+    '.empty{text-align:center;padding:30px;color:#64748b}',
+    '</style></head><body>',
+    '<h1>TAI XIU REALTIME</h1>',
+    '<div class="api-links"><a href="/api/md5" target="_blank">/api/md5</a><a href="/api/tx" target="_blank">/api/tx</a><a href="/api/all" target="_blank">/api/all</a><a href="/api/status" target="_blank">/api/status</a></div>',
+    '<div class="toolbar"><input id="search" placeholder="Tim ma phien..."><button onclick="clearAll()">Clear</button></div>',
+    '<div class="status"><span id="conn">Dang ket noi...</span> | MD5: <b id="countMd5">0</b> | Thuong: <b id="countTx">0</b></div>',
+    '<div class="grid">',
+    '<div class="panel md5"><h2>TAI XIU MD5</h2><div class="stats" id="statsMd5"><div class="item tai">TAI<b>-</b></div><div class="item xiu">XIU<b>-</b></div><div class="item">Ty le<b>-</b></div></div><div style="max-height:70vh;overflow-y:auto"><table><tbody id="bodyMd5"><tr><td class="empty">Chua co du lieu...</td></tr></tbody></table></div></div>',
+    '<div class="panel tx"><h2>TAI XIU THUONG</h2><div class="stats" id="statsTx"><div class="item tai">TAI<b>-</b></div><div class="item xiu">XIU<b>-</b></div><div class="item">Ty le<b>-</b></div></div><div style="max-height:70vh;overflow-y:auto"><table><tbody id="bodyTx"><tr><td class="empty">Chua co du lieu...</td></tr></tbody></table></div></div>',
+    '</div>',
+    '<script>',
+    'const proto=location.protocol==="https:"?"wss:":"ws:";let ws;const rows={md5:[],tx:[]};',
+    'function connectWs(){ws=new WebSocket(proto+"//"+location.host+"/ws");ws.onopen=()=>{document.getElementById("conn").textContent="Dang nhan realtime"};ws.onclose=()=>{document.getElementById("conn").textContent="Mat ket noi, thu lai...";setTimeout(connectWs,3000)};ws.onmessage=(ev)=>{const msg=JSON.parse(ev.data);if(msg.event==="init"){rows.md5=msg.md5||[];rows.tx=msg.tx||[];render("md5");render("tx");updateStats("md5");updateStats("tx")}else if(msg.event==="result"){const t=msg.type;rows[t].unshift(msg.data);if(rows[t].length>50)rows[t].pop();render(t);updateStats(t)}}}',
+    'connectWs();',
+    'function updateStats(t){const done=rows[t].filter(r=>r.result).slice(0,20);let tai=0,xiu=0;for(const s of done){if(s.result==="TÀI")tai++;else if(s.result==="XỈU")xiu++}const tot=done.length;const el=document.getElementById(t==="md5"?"statsMd5":"statsTx");el.querySelector(".tai b").textContent=tai;el.querySelector(".xiu b").textContent=xiu;el.querySelectorAll(".item b")[2].textContent=tot?(tai+"/"+xiu+" ("+(tai/tot*100).toFixed(0)+"% T)"):"-"}',
+    'function render(t){const tbody=document.getElementById(t==="md5"?"bodyMd5":"bodyTx");const f=document.getElementById("search").value.trim();const list=f?rows[t].filter(r=>String(r.matchId).includes(f)):rows[t];document.getElementById(t==="md5"?"countMd5":"countTx").textContent=rows[t].length;if(!list.length){tbody.innerHTML="<tr><td class=empty>Chua co du lieu...</td></tr>";return}tbody.innerHTML=list.map(r=>{if(!r.result)return "<tr><td>#"+r.matchId+"</td><td colspan=4>Dang cho ket qua...</td></tr>";const cls=r.result==="TÀI"?"tai":"xiu";const d=(r.dice||"0-0-0").split("-");return "<tr><td><b>#"+r.matchId+"</b></td><td><span class=dice>"+d[0]+"</span><span class=dice>"+d[1]+"</span><span class=dice>"+d[2]+"</span></td><td>"+r.sum+"</td><td class="+cls+">"+r.result+"</td><td>"+(r.md5?r.md5.substring(0,16)+"...":"")+"</td></tr>"}).join("")}',
+    'document.getElementById("search").addEventListener("input",()=>{render("md5");render("tx")});',
+    'function clearAll(){rows.md5=[];rows.tx=[];render("md5");render("tx")}',
+    '</script></body></html>'
+  ].join('\n');
+}
 
 export default {
   async fetch(request, env) {
@@ -665,7 +548,7 @@ export class TaiXiuDO {
     }
 
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      return new Response(HTML_PAGE, {
+      return new Response(getHtmlPage(), {
         headers: { 'content-type': 'text/html; charset=utf-8' }
       });
     }
@@ -706,7 +589,7 @@ export class TaiXiuDO {
         },
         tx: {
           pending: this.pending.tx,
-          latest: this.sessions.tx[0] ? formatSession(this.sessions.tx[0]) : null,
+          latest: this.sessions.tx[0] ? formatSession(this.sessions[type][0]) : null,
           stats: calcStats(this.sessions.tx, 20),
           data: this.sessions.tx.slice(0, MAX_HISTORY).map(formatSession)
         }
