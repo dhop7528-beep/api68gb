@@ -6,7 +6,9 @@ const { Server } = require('socket.io');
 
 // ============ CẤU HÌNH ============
 const WSS_URL = 'wss://koay56bcni5e0mk.cq.qnwxdhwica.com/';
-const HTTP_PORT = 5550;
+const HTTP_PORT = parseInt(process.env.PORT || '5550', 10);
+const BIND_HOST = process.env.BIND_HOST || '127.0.0.1'; // sau Cloudflare Tunnel chỉ cần localhost
+const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${HTTP_PORT}`;
 const MAX_HISTORY = 50;
 
 // Heartbeat — giảm xuống 10s để giữ NAT
@@ -27,21 +29,28 @@ const MAX_CONSECUTIVE_FAILURES = 10;
 const FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
 // === BỔ SUNG: cấu hình supervisor ===
-const SUPERVISOR_INTERVAL_MS  = 15000;   // kiểm tra mỗi 15s
-const STALE_OPEN_TIMEOUT_MS   = 60000;   // OPEN nhưng không message > 60s → terminate
-const RECONNECT_JITTER_MS     = 3000;    // random 0–3s tránh burst
-const HARD_RESTART_AFTER_FAIL = 20;      // fail liên tiếp → hard reset
+const SUPERVISOR_INTERVAL_MS  = 15000;
+const STALE_OPEN_TIMEOUT_MS   = 60000;
+const RECONNECT_JITTER_MS     = 3000;
+const HARD_RESTART_AFTER_FAIL = 20;
 
 // Debug: bật để log tất cả message
 const DEBUG_ALL_MESSAGES = false;
 
 // ============ HTTP + SOCKET.IO ============
 const app = express();
+app.set('trust proxy', 1);          // tin cậy Cloudflare (X-Forwarded-*)
+app.disable('x-powered-by');
+
 const server = http.createServer(app);
+
 const io = new Server(server, {
-  cors: { origin: '*' },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  transports: ['websocket', 'polling'], // ưu tiên websocket qua CF
   pingInterval: 25000,
-  pingTimeout:  20000
+  pingTimeout: 20000,
+  maxHttpBufferSize: 1e6,
+  allowEIO3: true
 });
 
 const sessions = { md5: [], tx: [] };
@@ -205,6 +214,16 @@ app.get('/api/status', (req, res) => {
   });
 });
 
+// Healthcheck cho Cloudflare Tunnel / uptime monitor
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    wsState: ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] : 'NOT_INIT',
+    lastMessageAgoSec: lastMessageAt ? Math.floor((Date.now() - lastMessageAt) / 1000) : null
+  });
+});
+
 // ============ HTML ============
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="vi">
@@ -262,6 +281,7 @@ const HTML_PAGE = `<!DOCTYPE html>
     <a href="/api/all" target="_blank">/api/all</a>
     <a href="/api/signal" target="_blank">/api/signal</a>
     <a href="/api/status" target="_blank">/api/status</a>
+    <a href="/health" target="_blank">/health</a>
   </div>
   <div class="toolbar">
     <input id="search" placeholder="Tìm mã phiên...">
@@ -297,7 +317,8 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-  const socket = io();
+  // Ép websocket để tránh polling bị Cloudflare buffer
+  const socket = io({ transports: ['websocket'] });
   const rows = { md5: [], tx: [] };
 
   socket.on('connect', () => document.getElementById('conn').textContent = 'Đang nhận realtime');
@@ -381,14 +402,16 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(HTTP_PORT, '0.0.0.0', () => {
+server.listen(HTTP_PORT, BIND_HOST, () => {
   console.log('🌐 Web + API đang chạy:');
-  console.log(`   - Web:        http://161.248.4.235:${HTTP_PORT}`);
-  console.log(`   - API MD5:    http://161.248.4.235:${HTTP_PORT}/api/md5`);
-  console.log(`   - API TX:     http://161.248.4.235:${HTTP_PORT}/api/tx`);
-  console.log(`   - API ALL:    http://161.248.4.235:${HTTP_PORT}/api/all`);
-  console.log(`   - API SIGNAL: http://161.248.4.235:${HTTP_PORT}/api/signal`);
-  console.log(`   - API STATUS: http://161.248.4.235:${HTTP_PORT}/api/status`);
+  console.log(`   - Bind:       ${BIND_HOST}:${HTTP_PORT}`);
+  console.log(`   - Public:     ${PUBLIC_URL}`);
+  console.log(`   - Health:     ${PUBLIC_URL}/health`);
+  console.log(`   - API MD5:    ${PUBLIC_URL}/api/md5`);
+  console.log(`   - API TX:     ${PUBLIC_URL}/api/tx`);
+  console.log(`   - API ALL:    ${PUBLIC_URL}/api/all`);
+  console.log(`   - API SIGNAL: ${PUBLIC_URL}/api/signal`);
+  console.log(`   - API STATUS: ${PUBLIC_URL}/api/status`);
 });
 
 // ============ PUSH ============
@@ -409,7 +432,7 @@ console.log(`🚀 Khởi động tool. Server: ${WSS_URL}`);
 
 const options = {
   headers: {
-    'Origin': 'https://68gbvn88.bar',
+    'Origin': 'https://68gamebai66.pro',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Language': 'vi,fr-FR;q=0.9,fr;q=0.8,en-US;q=0.7,en;q=0.6',
     'Cache-Control': 'no-cache',
@@ -424,7 +447,7 @@ let currentTxMatchId = '???';
 let pingInterval = null;
 let watchdogInterval = null;
 let reloginInterval = null;
-let supervisorInterval = null;   // === BỔ SUNG ===
+let supervisorInterval = null;
 let isAlive = false;
 let reconnectAttempts = 0;
 let consecutiveFailures = 0;
@@ -558,13 +581,12 @@ function cleanupTimers() {
   stopRelogin();
 }
 
-// ============ SUPERVISOR (BỔ SUNG) ============
+// ============ SUPERVISOR ============
 function startSupervisor() {
   stopSupervisor();
   supervisorInterval = setInterval(() => {
     const now = Date.now();
 
-    // 1. Không có ws / đã đóng mà không có timer reconnect → kẹt
     if ((!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING)
         && !reconnectTimer) {
       console.log('👁️  Supervisor: socket chết không có timer → reconnect');
@@ -572,7 +594,6 @@ function startSupervisor() {
       return;
     }
 
-    // 2. OPEN nhưng quá lâu không có message → half-open
     if (ws && ws.readyState === WebSocket.OPEN && lastMessageAt) {
       const idle = now - lastMessageAt;
       if (idle > STALE_OPEN_TIMEOUT_MS) {
@@ -582,7 +603,6 @@ function startSupervisor() {
       }
     }
 
-    // 3. Quá nhiều fail liên tiếp → hard reset
     if (consecutiveFailures >= HARD_RESTART_AFTER_FAIL) {
       console.log('👁️  Supervisor: quá nhiều fail → hard reset');
       cooldownUntil = 0;
@@ -596,7 +616,7 @@ function stopSupervisor() {
   if (supervisorInterval) { clearInterval(supervisorInterval); supervisorInterval = null; }
 }
 
-// ============ FORCE RECONNECT (BỔ SUNG) ============
+// ============ FORCE RECONNECT ============
 function forceReconnect(reason) {
   console.log(`🔧 forceReconnect: ${reason}`);
   cleanupTimers();
@@ -765,7 +785,6 @@ function connect() {
   sessionSeq++;
   const thisSession = sessionSeq;
 
-  // Đảm bảo không có timer reconnect treo
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 
   console.log(`\n🔌 [Session ${thisSession}] Đang kết nối tới ${WSS_URL}...`);
@@ -810,7 +829,6 @@ function connect() {
 
   ws.on('message', (data) => {
     if (thisSession !== sessionSeq) return;
-    // === BỔ SUNG: bọc try/catch để exception không làm chết luồng ===
     try {
       handleMessage(data, thisSession);
     } catch (e) {
@@ -841,18 +859,16 @@ function connect() {
   ws.on('error', function error(err) {
     if (thisSession !== sessionSeq) return;
     console.error(`❌ [Session ${thisSession}] Lỗi WebSocket: ${err.message}`);
-    // === BỔ SUNG: một số lỗi không tự đóng socket → chủ động terminate ===
     try {
       if (this.readyState !== WebSocket.CLOSED) this.terminate();
     } catch (e) {}
   });
 }
 
-// ============ SCHEDULE RECONNECT (ĐÃ HARDEN) ============
+// ============ SCHEDULE RECONNECT ============
 function scheduleReconnect() {
   if (reconnectTimer) return;
 
-  // Guard: nếu ws đang CONNECTING/OPEN thì không schedule
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
     return;
   }
@@ -893,10 +909,8 @@ function scheduleReconnect() {
 startSupervisor();
 connect();
 
-// Đảm bảo supervisor luôn chạy kể cả khi bị clear nhầm
 setInterval(() => { if (!supervisorInterval) startSupervisor(); }, 60000);
 
-// Log trạng thái mỗi 5 phút
 setInterval(() => {
   const state = ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] : 'NULL';
   const upMin = Math.floor((Date.now() - processStartTime) / 60000);
@@ -906,7 +920,6 @@ setInterval(() => {
 
 process.on('uncaughtException', (err) => {
   console.error('💥 uncaughtException:', err.message);
-  // === BỔ SUNG: nếu ws đang OPEN mà exception bất thường → chủ động reset ===
   try {
     if (ws && ws.readyState === WebSocket.OPEN) forceReconnect('uncaught');
   } catch (e) {}
