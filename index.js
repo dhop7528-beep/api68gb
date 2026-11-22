@@ -15,8 +15,6 @@ const STABLE_CONNECTION_MS     = 30000;
 const MAX_CONSECUTIVE_FAILURES = 10;
 const FAILURE_COOLDOWN_MS      = 5 * 60 * 1000;
 
-const DEBUG_ALL_MESSAGES = false;
-
 const HANDSHAKE_HEX   = "010000727b22737973223a7b22706c6174666f726d223a226a732d776562736f636b6574222c22636c69656e744275696c644e756d626572223a22302e302e31222c22636c69656e7456657273696f6e223a223061323134383164373436663932663834323865316236646565623736666561227d7d";
 const LOGIN_HEX       = "0400004d01040001080210ca011a40373537626233613938353539346563356133303764333537343666366565626138356432373862336536373634343061626265393239383531316535393537624200";
 const JOIN_ROOM_HEX   = "040000250005226d6e6d6473622e6d6e6d64736268616e646c65722e656e74657267616d65726f6f6d";
@@ -159,170 +157,8 @@ function md5Fallback(s) {
   return hex(a)+hex(b)+hex(c)+hex(d);
 }
 
-const HTML_PAGE = `<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tài Xỉu Realtime</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: 'Segoe UI', Arial, sans-serif;
-    background: #0f172a; color: #e2e8f0; padding: 12px; }
-  h1 { text-align: center; font-size: 18px; margin: 0 0 8px; color: #38bdf8; }
-  .api-links { text-align: center; margin-bottom: 12px; font-size: 13px; }
-  .api-links a { color: #38bdf8; text-decoration: none; margin: 0 4px;
-    padding: 4px 10px; border: 1px solid #38bdf8; border-radius: 4px; display: inline-block; margin-bottom: 4px; }
-  .api-links a:hover { background: #38bdf8; color: #0f172a; }
-  .toolbar { text-align: center; margin-bottom: 12px; }
-  .toolbar input { background: #1e293b; border: 1px solid #334155; color: #e2e8f0;
-    padding: 8px 12px; border-radius: 6px; width: 180px; font-size: 14px; }
-  .toolbar button { background: #ef4444; color: white; border: none; padding: 8px 14px;
-    border-radius: 6px; cursor: pointer; margin-left: 6px; font-size: 14px; }
-  .status { text-align: center; margin-bottom: 12px; font-size: 12px; color: #94a3b8; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-    background: #22c55e; margin-right: 6px; animation: pulse 1.5s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 1400px; margin: 0 auto; }
-  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-  .panel { background: #1e293b; border-radius: 10px; overflow: hidden; border: 1px solid #334155; }
-  .panel h2 { margin: 0; padding: 10px; font-size: 14px; text-align: center; color: white; letter-spacing: 1px; }
-  .panel.md5 h2 { background: #8b5cf6; }
-  .panel.tx h2 { background: #f59e0b; }
-  .stats { display: flex; gap: 8px; padding: 8px 10px; background: #0f172a; font-size: 12px; }
-  .stats .item { flex: 1; text-align: center; padding: 4px; border-radius: 4px; background: #1e293b; }
-  .stats .item b { display: block; font-size: 14px; margin-top: 2px; }
-  .stats .tai b { color: #22c55e; }
-  .stats .xiu b { color: #ef4444; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td { padding: 8px; border-top: 1px solid #334155; }
-  tr.start td { color: #94a3b8; font-style: italic; }
-  tr.end.tai td { background: rgba(34,197,94,.10); }
-  tr.end.xiu td { background: rgba(239,68,68,.10); }
-  .tai { color: #22c55e; font-weight: bold; }
-  .xiu { color: #ef4444; font-weight: bold; }
-  .md5hash { font-family: monospace; font-size: 11px; color: #94a3b8; word-break: break-all; }
-  .dice { display: inline-block; background: #334155; border-radius: 4px; padding: 2px 6px;
-    font-family: monospace; font-weight: bold; margin-right: 2px; }
-  .empty { text-align: center; padding: 30px; color: #64748b; font-style: italic; }
-</style>
-</head>
-<body>
-  <h1>🎲 TÀI XỈU REALTIME (Cloudflare)</h1>
-  <div class="api-links">
-    <a href="/api/md5" target="_blank">/api/md5</a>
-    <a href="/api/tx" target="_blank">/api/tx</a>
-    <a href="/api/all" target="_blank">/api/all</a>
-    <a href="/api/signal" target="_blank">/api/signal</a>
-    <a href="/api/status" target="_blank">/api/status</a>
-  </div>
-  <div class="toolbar">
-    <input id="search" placeholder="Tìm mã phiên...">
-    <button onclick="clearAll()">🗑 Clear</button>
-  </div>
-  <div class="status"><span class="dot"></span><span id="conn">Đang kết nối...</span>
-    | MD5: <b id="countMd5">0</b> | Thường: <b id="countTx">0</b></div>
-
-  <div class="grid">
-    <div class="panel md5">
-      <h2>🔮 TÀI XỈU MD5</h2>
-      <div class="stats" id="statsMd5">
-        <div class="item tai">TÀI<b>-</b></div>
-        <div class="item xiu">XỈU<b>-</b></div>
-        <div class="item">Tỷ lệ<b>-</b></div>
-      </div>
-      <div style="max-height: 70vh; overflow-y: auto;">
-        <table><tbody id="bodyMd5"><tr><td class="empty">Chưa có dữ liệu...</td></tr></tbody></table>
-      </div>
-    </div>
-    <div class="panel tx">
-      <h2>💰 TÀI XỈU THƯỜNG</h2>
-      <div class="stats" id="statsTx">
-        <div class="item tai">TÀI<b>-</b></div>
-        <div class="item xiu">XỈU<b>-</b></div>
-        <div class="item">Tỷ lệ<b>-</b></div>
-      </div>
-      <div style="max-height: 70vh; overflow-y: auto;">
-        <table><tbody id="bodyTx"><tr><td class="empty">Chưa có dữ liệu...</td></tr></tbody></table>
-      </div>
-    </div>
-  </div>
-
-<script>
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  let ws;
-  const rows = { md5: [], tx: [] };
-
-  function connectWs() {
-    ws = new WebSocket(proto + '//' + location.host + '/ws');
-    ws.onopen = () => document.getElementById('conn').textContent = 'Đang nhận realtime';
-    ws.onclose = () => {
-      document.getElementById('conn').textContent = 'Mất kết nối, thử lại...';
-      setTimeout(connectWs, 3000);
-    };
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.event === 'init') {
-        rows.md5 = msg.md5 || [];
-        rows.tx = msg.tx || [];
-        render('md5'); render('tx');
-        updateStats('md5'); updateStats('tx');
-      } else if (msg.event === 'result') {
-        const type = msg.type;
-        rows[type].unshift(msg.data);
-        if (rows[type].length > 50) rows[type].pop();
-        render(type);
-        updateStats(type);
-      }
-    };
-  }
-  connectWs();
-
-  function updateStats(type) {
-    const done = rows[type].filter(r => r.result).slice(0, 20);
-    let tai = 0, xiu = 0;
-    for (const s of done) {
-      if (s.result === 'TÀI') tai++;
-      else if (s.result === 'XỈU') xiu++;
-    }
-    const total = done.length;
-    const el = document.getElementById(type === 'md5' ? 'statsMd5' : 'statsTx');
-    el.querySelector('.tai b').textContent = tai;
-    el.querySelector('.xiu b').textContent = xiu;
-    el.querySelectorAll('.item b')[2].textContent =
-      total ? tai + '/' + xiu + ' (' + (tai/total*100).toFixed(0) + '% T)' : '-';
-  }
-
-  function render(type) {
-    const tbody = document.getElementById(type === 'md5' ? 'bodyMd5' : 'bodyTx');
-    const filter = document.getElementById('search').value.trim();
-    const list = filter ? rows[type].filter(r => String(r.matchId).includes(filter)) : rows[type];
-    document.getElementById(type === 'md5' ? 'countMd5' : 'countTx').textContent = rows[type].length;
-    if (list.length === 0) {
-      tbody.innerHTML = '<tr><td class="empty">Chưa có dữ liệu...</td></tr>';
-      return;
-    }
-    tbody.innerHTML = list.map(r => {
-      if (!r.result) {
-        return '<tr class="start"><td>#' + r.matchId + '</td><td>BẮT ĐẦU</td>' +
-          '<td colspan="3">' + (r.md5 ? 'MD5: ' + r.md5.substring(0,20) + '...' : 'Đang chờ kết quả...') + '</td></tr>';
-      }
-      const cls = r.result === 'TÀI' ? 'tai' : 'xiu';
-      const d = (r.dice || '0-0-0').split('-');
-      return '<tr class="end ' + cls + '">' +
-        '<td><b>#' + r.matchId + '</b></td>' +
-        '<td><span class="dice">' + d[0] + '</span><span class="dice">' + d[1] + '</span><span class="dice">' + d[2] + '</span></td>' +
-        '<td>' + r.sum + '</td>' +
-        '<td class="' + cls + '">' + r.result + '</td>' +
-        '<td class="md5hash">' + (r.md5 ? r.md5.substring(0,16) + '...' : '') + '</td></tr>';
-    }).join('');
-  }
-
-  document.getElementById('search').addEventListener('input', () => { render('md5'); render('tx'); });
-  function clearAll() { rows.md5 = []; rows.tx = []; render('md5'); render('tx'); }
-</script>
-</body>
-</html>`;
+// Đã nén HTML thành JSON string để chống lỗi font trên điện thoại
+const HTML_PAGE = "<!DOCTYPE html>\n<html lang=\"vi\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Tài Xỉu Realtime</title>\n<style>\n  * { box-sizing: border-box; }\n  body { margin: 0; font-family: 'Segoe UI', Arial, sans-serif;\n    background: #0f172a; color: #e2e8f0; padding: 12px; }\n  h1 { text-align: center; font-size: 18px; margin: 0 0 8px; color: #38bdf8; }\n  .api-links { text-align: center; margin-bottom: 12px; font-size: 13px; }\n  .api-links a { color: #38bdf8; text-decoration: none; margin: 0 4px;\n    padding: 4px 10px; border: 1px solid #38bdf8; border-radius: 4px; display: inline-block; margin-bottom: 4px; }\n  .api-links a:hover { background: #38bdf8; color: #0f172a; }\n  .toolbar { text-align: center; margin-bottom: 12px; }\n  .toolbar input { background: #1e293b; border: 1px solid #334155; color: #e2e8f0;\n    padding: 8px 12px; border-radius: 6px; width: 180px; font-size: 14px; }\n  .toolbar button { background: #ef4444; color: white; border: none; padding: 8px 14px;\n    border-radius: 6px; cursor: pointer; margin-left: 6px; font-size: 14px; }\n  .status { text-align: center; margin-bottom: 12px; font-size: 12px; color: #94a3b8; }\n  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;\n    background: #22c55e; margin-right: 6px; animation: pulse 1.5s infinite; }\n  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }\n  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 1400px; margin: 0 auto; }\n  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }\n  .panel { background: #1e293b; border-radius: 10px; overflow: hidden; border: 1px solid #334155; }\n  .panel h2 { margin: 0; padding: 10px; font-size: 14px; text-align: center; color: white; letter-spacing: 1px; }\n  .panel.md5 h2 { background: #8b5cf6; }\n  .panel.tx h2 { background: #f59e0b; }\n  .stats { display: flex; gap: 8px; padding: 8px 10px; background: #0f172a; font-size: 12px; }\n  .stats .item { flex: 1; text-align: center; padding: 4px; border-radius: 4px; background: #1e293b; }\n  .stats .item b { display: block; font-size: 14px; margin-top: 2px; }\n  .stats .tai b { color: #22c55e; }\n  .stats .xiu b { color: #ef4444; }\n  table { width: 100%; border-collapse: collapse; font-size: 13px; }\n  td { padding: 8px; border-top: 1px solid #334155; }\n  tr.start td { color: #94a3b8; font-style: italic; }\n  tr.end.tai td { background: rgba(34,197,94,.10); }\n  tr.end.xiu td { background: rgba(239,68,68,.10); }\n  .tai { color: #22c55e; font-weight: bold; }\n  .xiu { color: #ef4444; font-weight: bold; }\n  .md5hash { font-family: monospace; font-size: 11px; color: #94a3b8; word-break: break-all; }\n  .dice { display: inline-block; background: #334155; border-radius: 4px; padding: 2px 6px;\n    font-family: monospace; font-weight: bold; margin-right: 2px; }\n  .empty { text-align: center; padding: 30px; color: #64748b; font-style: italic; }\n</style>\n</head>\n<body>\n  <h1>🎲 TÀI XỈU REALTIME (Cloudflare)</h1>\n  <div class=\"api-links\">\n    <a href=\"/api/md5\" target=\"_blank\">/api/md5</a>\n    <a href=\"/api/tx\" target=\"_blank\">/api/tx</a>\n    <a href=\"/api/all\" target=\"_blank\">/api/all</a>\n    <a href=\"/api/signal\" target=\"_blank\">/api/signal</a>\n    <a href=\"/api/status\" target=\"_blank\">/api/status</a>\n  </div>\n  <div class=\"toolbar\">\n    <input id=\"search\" placeholder=\"Tìm mã phiên...\">\n    <button onclick=\"clearAll()\">🗑 Clear</button>\n  </div>\n  <div class=\"status\"><span class=\"dot\"></span><span id=\"conn\">Đang kết nối...</span>\n    | MD5: <b id=\"countMd5\">0</b> | Thường: <b id=\"countTx\">0</b></div>\n\n  <div class=\"grid\">\n    <div class=\"panel md5\">\n      <h2>🔮 TÀI XỈU MD5</h2>\n      <div class=\"stats\" id=\"statsMd5\">\n        <div class=\"item tai\">TÀI<b>-</b></div>\n        <div class=\"item xiu\">XỈU<b>-</b></div>\n        <div class=\"item\">Tỷ lệ<b>-</b></div>\n      </div>\n      <div style=\"max-height: 70vh; overflow-y: auto;\">\n        <table><tbody id=\"bodyMd5\"><tr><td class=\"empty\">Chưa có dữ liệu...</td></tr></tbody></table>\n      </div>\n    </div>\n    <div class=\"panel tx\">\n      <h2>💰 TÀI XỈU THƯỜNG</h2>\n      <div class=\"stats\" id=\"statsTx\">\n        <div class=\"item tai\">TÀI<b>-</b></div>\n        <div class=\"item xiu\">XỈU<b>-</b></div>\n        <div class=\"item\">Tỷ lệ<b>-</b></div>\n      </div>\n      <div style=\"max-height: 70vh; overflow-y: auto;\">\n        <table><tbody id=\"bodyTx\"><tr><td class=\"empty\">Chưa có dữ liệu...</td></tr></tbody></table>\n      </div>\n    </div>\n  </div>\n\n<script>\n  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';\n  let ws;\n  const rows = { md5: [], tx: [] };\n\n  function connectWs() {\n    ws = new WebSocket(proto + '//' + location.host + '/ws');\n    ws.onopen = () => document.getElementById('conn').textContent = 'Đang nhận realtime';\n    ws.onclose = () => {\n      document.getElementById('conn').textContent = 'Mất kết nối, thử lại...';\n      setTimeout(connectWs, 3000);\n    };\n    ws.onmessage = (ev) => {\n      const msg = JSON.parse(ev.data);\n      if (msg.event === 'init') {\n        rows.md5 = msg.md5 || [];\n        rows.tx = msg.tx || [];\n        render('md5'); render('tx');\n        updateStats('md5'); updateStats('tx');\n      } else if (msg.event === 'result') {\n        const type = msg.type;\n        rows[type].unshift(msg.data);\n        if (rows[type].length > 50) rows[type].pop();\n        render(type);\n        updateStats(type);\n      }\n    };\n  }\n  connectWs();\n\n  function updateStats(type) {\n    const done = rows[type].filter(r => r.result).slice(0, 20);\n    let tai = 0, xiu = 0;\n    for (const s of done) {\n      if (s.result === 'TÀI') tai++;\n      else if (s.result === 'XỈU') xiu++;\n    }\n    const total = done.length;\n    const el = document.getElementById(type === 'md5' ? 'statsMd5' : 'statsTx');\n    el.querySelector('.tai b').textContent = tai;\n    el.querySelector('.xiu b').textContent = xiu;\n    el.querySelectorAll('.item b')[2].textContent =\n      total ? tai + '/' + xiu + ' (' + (tai/total*100).toFixed(0) + '% T)' : '-';\n  }\n\n  function render(type) {\n    const tbody = document.getElementById(type === 'md5' ? 'bodyMd5' : 'bodyTx');\n    const filter = document.getElementById('search').value.trim();\n    const list = filter ? rows[type].filter(r => String(r.matchId).includes(filter)) : rows[type];\n    document.getElementById(type === 'md5' ? 'countMd5' : 'countTx').textContent = rows[type].length;\n    if (list.length === 0) {\n      tbody.innerHTML = '<tr><td class=\"empty\">Chưa có dữ liệu...</td></tr>';\n      return;\n    }\n    tbody.innerHTML = list.map(r => {\n      if (!r.result) {\n        return '<tr class=\"start\"><td>#' + r.matchId + '</td><td>BẮT ĐẦU</td>' +\n          '<td colspan=\"3\">' + (r.md5 ? 'MD5: ' + r.md5.substring(0,20) + '...' : 'Đang chờ kết quả...') + '</td></tr>';\n      }\n      const cls = r.result === 'TÀI' ? 'tai' : 'xiu';\n      const d = (r.dice || '0-0-0').split('-');\n      return '<tr class=\"end ' + cls + '\">' +\n        '<td><b>#' + r.matchId + '</b></td>' +\n        '<td><span class=\"dice\">' + d[0] + '</span><span class=\"dice\">' + d[1] + '</span><span class=\"dice\">' + d[2] + '</span></td>' +\n        '<td>' + r.sum + '</td>' +\n        '<td class=\"' + cls + '\">' + r.result + '</td>' +\n        '<td class=\"md5hash\">' + (r.md5 ? r.md5.substring(0,16) + '...' : '') + '</td></tr>';\n    }).join('');\n  }\n\n  document.getElementById('search').addEventListener('input', () => { render('md5'); render('tx'); });\n  function clearAll() { rows.md5 = []; rows.tx = []; render('md5'); render('tx'); }\n</script>\n</body>\n</html>";
 
 export default {
   async fetch(request, env) {
@@ -662,4 +498,4 @@ export class TaiXiuDO {
 
     return new Response('Not found', { status: 404 });
   }
-         
+                                        
