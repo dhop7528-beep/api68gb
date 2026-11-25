@@ -1,253 +1,235 @@
-const express = require("express");
-const fs = require("fs");
-const path = require("path");
+
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
 
 const app = express();
+// Render sẽ tự động cấp PORT qua biến môi trường, mặc định 3000 nếu chạy local
 const PORT = process.env.PORT || 3000;
 
-const SOURCE_API = "http://103.249.117.229:17227/api/68gb/md5";
-const CACHE_TTL_MS = 1200;
-const HISTORY_FILE = path.join(__dirname, "history_68gb_md5.json");
+app.use(cors());
+app.use(express.json());
 
-let cache = {
-  data: null,
-  expiresAt: 0,
-};
+// Link API lịch sử gốc
+const HISTORY_API_URL = 'http://103.249.117.229:17227/api/68gb/vhmd5';
 
-// Lưu lịch sử tích lũy: { phien, sum, sign, dice }
-let historyStore = loadHistory();
+/**
+ * Hàm lấy dữ liệu lịch sử từ API gốc và sắp xếp tăng dần theo số phiên (cũ -> mới)
+ */
+async function fetchHistoryData() {
+    try {
+        const response = await axios.get(HISTORY_API_URL, { timeout: 8000 });
+        const jsonData = response.data;
 
-function loadHistory() {
-  try {
-    if (fs.existsSync(HISTORY_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8"));
-      if (Array.isArray(parsed)) return parsed.slice(-300);
+        if (!jsonData || !jsonData.success || !Array.isArray(jsonData.data) || jsonData.data.length === 0) {
+            return { data: null, error: 'Dữ liệu API lịch sử trống hoặc không hợp lệ.' };
+        }
+
+        // Sắp xếp tăng dần theo phiên để phân tích đúng chiều thời gian
+        const sortedData = jsonData.data.sort((a, b) => Number(a.phien) - Number(b.phien));
+        return { data: sortedData, error: null };
+    } catch (err) {
+        return { data: null, error: `Lỗi kết nối API lịch sử: ${err.message}` };
     }
-  } catch (_) {}
-  return [];
 }
 
-function saveHistory() {
-  try {
-    fs.writeFileSync(
-      HISTORY_FILE,
-      JSON.stringify(historyStore.slice(-300), null, 2),
-      "utf8"
-    );
-  } catch (_) {}
-}
+/**
+ * Thuật toán VIP phân tích Pattern thực tế (Không random)
+ * Nhận diện cầu bệt, cầu 1-1, 2-2, 1-2-1, 1-2-3 và lực điểm xúc xắc để quyết định THEO CẦU hay BẺ CẦU
+ */
+function analyzePatternVIP(history) {
+    // Chuyển đổi kết quả sang dạng ký hiệu T (Tài) và X (Xỉu)
+    const seq = history.map(item => item.result.trim().toLowerCase() === 'tài' ? 'T' : 'X');
+    const sums = history.map(item => Number(item.sum));
 
-function toTX(item) {
-  if (typeof item.result === "string") {
-    const r = item.result.trim().toLowerCase();
-    if (r === "tài" || r === "tai" || r === "t") return "T";
-    if (r === "xỉu" || r === "xiu" || r === "x") return "X";
-  }
-  if (typeof item.sum === "number") {
-    return item.sum >= 11 ? "T" : "X";
-  }
-  return "X";
-}
+    const n = seq.length;
+    const lastItem = history[n - 1];
+    const nextPhien = Number(lastItem.phien) + 1;
 
-function mergeHistory(incomingList) {
-  if (!Array.isArray(incomingList) || incomingList.length === 0) {
-    throw new Error("Danh sách phiên trống");
-  }
+    // Chuỗi pattern 12 phiên gần nhất
+    const recentPattern = seq.slice(-12).join('-');
 
-  const map = new Map();
-  for (const item of historyStore) {
-    if (item && item.phien !== undefined) {
-      map.set(Number(item.phien), item);
-    }
-  }
-
-  for (const raw of incomingList) {
-    if (raw && raw.phien !== undefined) {
-      const phienNum = Number(raw.phien);
-      map.set(phienNum, {
-        phien: phienNum,
-        sum: typeof raw.sum === "number" ? raw.sum : null,
-        dice: raw.dice ?? null,
-        sign: toTX(raw),
-      });
-    }
-  }
-
-  historyStore = [...map.values()]
-    .sort((a, b) => a.phien - b.phien)
-    .slice(-300);
-
-  saveHistory();
-  return historyStore;
-}
-
-function detectStreakAndCadence(seqArr) {
-  // Đếm độ dài chuỗi bệt liên tiếp ở cuối (ví dụ: TTT -> 3)
-  const lastChar = seqArr[seqArr.length - 1];
-  let streakLen = 1;
-  for (let i = seqArr.length - 2; i >= 0; i--) {
-    if (seqArr[i] === lastChar) streakLen++;
-    else break;
-  }
-
-  // Kiểm tra nhịp xen kẽ 1-1 ở 4 phiên cuối (ví dụ: TXTX hoặc XTXT)
-  let alternating11 = false;
-  if (seqArr.length >= 4) {
-    const w4 = seqArr.slice(-4);
-    alternating11 =
-      w4[0] !== w4[1] && w4[1] !== w4[2] && w4[2] !== w4[3];
-  }
-
-  return { lastChar, streakLen, alternating11 };
-}
-
-function analyzeBridge(list) {
-  const ordered = mergeHistory(list);
-  const latest = ordered[ordered.length - 1];
-  const predictedSession = Number(latest.phien) + 1;
-
-  const seqArr = ordered.map((x) => x.sign);
-  const currentPattern = seqArr.join("");
-  const recent12 = seqArr.slice(-12).join("");
-
-  const { lastChar, streakLen, alternating11 } = detectStreakAndCadence(seqArr);
-
-  // 1. Khớp mẫu n-gram trong lịch sử trước phiên cuối (ưu tiên 5 -> 4 -> 3 -> 2)
-  const historyBeforeLatest = seqArr.slice(0, -1).join("");
-  let nGramScoreT = 0.5;
-  let nGramScoreX = 0.5;
-  let nGramSummary = "chưa đủ mẫu lặp dài";
-
-  for (const len of [5, 4, 3, 2]) {
-    if (seqArr.length <= len) continue;
-    const suffix = seqArr.slice(-len).join("");
-    let cT = 0;
-    let cX = 0;
-
-    for (let i = 0; i <= historyBeforeLatest.length - len - 1; i++) {
-      if (historyBeforeLatest.slice(i, i + len) === suffix) {
-        const nxt = historyBeforeLatest[i + len];
-        if (nxt === "T") cT++;
-        else if (nxt === "X") cX++;
-      }
+    // Tính độ dài dây bệt hiện tại ở cuối chuỗi
+    const currentChar = seq[n - 1];
+    let streak = 0;
+    for (let i = n - 1; i >= 0; i--) {
+        if (seq[i] === currentChar) {
+            streak++;
+        } else {
+            break;
+        }
     }
 
-    if (cT + cX > 0) {
-      nGramScoreT = cT / (cT + cX);
-      nGramScoreX = cX / (cT + cX);
-      nGramSummary = `mẫu ${suffix} xuất hiện ${cT + cX} lần trước đó (sau đó ra ${cT}T/${cX}X)`;
-      break;
+    let predictionChar = currentChar;
+    let confidence = 70.0;
+    let reason = '';
+    let strategy = '';
+
+    // --- TẦNG 1: PHÂN TÍCH CẦU BỆT (STREAK >= 4) ---
+    if (streak >= 4) {
+        const last3Sums = sums.slice(-3);
+        if (currentChar === 'T') {
+            // Tài bệt nhưng điểm giảm dần về sát mốc 11 -> Dấu hiệu hụt hơi, bẻ cầu
+            if (last3Sums[last3Sums.length - 1] <= 11 && last3Sums[0] > last3Sums[last3Sums.length - 1]) {
+                predictionChar = 'X';
+                confidence = 86.5;
+                strategy = 'BẺ CẦU';
+                reason = `Cầu bệt Tài dây ${streak} nhưng tổng điểm đang suy yếu về mốc biên (${last3Sums[last3Sums.length - 1]} điểm). Tín hiệu đảo chiều sang Xỉu cực cao.`;
+            } else if (streak >= 7) {
+                predictionChar = 'X';
+                confidence = 89.0;
+                strategy = 'BẺ CẦU';
+                reason = `Cầu bệt Tài đã kéo dài tới ${streak} tay (chạm ngưỡng bão hòa). Thuật toán ưu tiên bẻ gãy chuỗi sang Xỉu.`;
+            } else {
+                predictionChar = 'T';
+                confidence = 84.0;
+                strategy = 'THEO CẦU';
+                reason = `Cầu bệt Tài đang vào form đẹp (dây ${streak}), lực xúc xắc duy trì ổn định. Tiếp tục theo bệt.`;
+            }
+        } else {
+            // Xỉu bệt nhưng điểm tăng dần lên sát mốc 10 -> Dấu hiệu đảo chiều sang Tài
+            if (last3Sums[last3Sums.length - 1] >= 10 && last3Sums[0] < last3Sums[last3Sums.length - 1]) {
+                predictionChar = 'T';
+                confidence = 86.5;
+                strategy = 'BẺ CẦU';
+                reason = `Cầu bệt Xỉu dây ${streak} nhưng tổng điểm đang đẩy sát biên trên (${last3Sums[last3Sums.length - 1]} điểm). Khả năng cao bẻ sang Tài.`;
+            } else if (streak >= 7) {
+                predictionChar = 'T';
+                confidence = 89.0;
+                strategy = 'BẺ CẦU';
+                reason = `Cầu bệt Xỉu đạt đỉnh ${streak} tay liên tiếp. Áp dụng quy tắc hồi quy xác suất để bẻ sang Tài.`;
+            } else {
+                predictionChar = 'X';
+                confidence = 84.0;
+                strategy = 'THEO CẦU';
+                reason = `Đang chạy dây bệt Xỉu (${streak} phiên liên tiếp), nhịp cầu chưa có dấu hiệu hụt hơi. Đánh theo cầu.`;
+            }
+        }
     }
-  }
+    // --- TẦNG 2: PHÂN TÍCH CẦU NGẮN & CẦU ĐỐI XỨNG (STREAK < 4) ---
+    else if (n >= 4) {
+        const tail4 = seq.slice(-4).join('');
+        const tail5 = n >= 5 ? seq.slice(-5).join('') : '';
 
-  // 2. Phân tích cấu trúc cầu hiện tại (bệt / nhịp 1-1 / tỷ lệ gần nhất)
-  let bridgeScoreT = 0.5;
-  let bridgeScoreX = 0.5;
-  let bridgeSummary = "";
-
-  if (alternating11) {
-    // Đang đi nhịp 1-1 -> xu hướng đảo chiều sang mặt đối lập
-    const nextOpp = lastChar === "T" ? "X" : "T";
-    bridgeScoreT = nextOpp === "T" ? 0.65 : 0.35;
-    bridgeScoreX = nextOpp === "X" ? 0.65 : 0.35;
-    bridgeSummary = `cầu nhịp 1-1 ở đuôi ${seqArr.slice(-4).join("")}, thiên về đảo sang ${nextOpp}`;
-  } else if (streakLen >= 3) {
-    // Đang bệt >= 3 -> cân nhắc theo bệt hoặc bẻ cầu nhẹ tùy độ dài bệt
-    const followStreak = streakLen <= 4;
-    const target = followStreak ? lastChar : lastChar === "T" ? "X" : "T";
-    bridgeScoreT = target === "T" ? 0.62 : 0.38;
-    bridgeScoreX = target === "X" ? 0.62 : 0.38;
-    bridgeSummary = followStreak
-      ? `cầu bệt ${lastChar} đang dài ${streakLen} phiên, thiên về bám bệt ${target}`
-      : `bệt ${lastChar} đã kéo ${streakLen} phiên, thiên về bẻ sang ${target}`;
-  } else {
-    const tCount = seqArr.slice(-12).filter((c) => c === "T").length;
-    const xCount = seqArr.slice(-12).length - tCount;
-    const totalW = Math.max(tCount + xCount, 1);
-    bridgeScoreT = tCount / totalW;
-    bridgeScoreX = xCount / totalW;
-    bridgeSummary = `cầu biến thiên (${tCount}T/${xCount}X trong ${Math.min(
-      12,
-      seqArr.length
-    )} phiên gần nhất)`;
-  }
-
-  // Tổng hợp điểm (50% khớp mẫu lịch sử + 50% cấu trúc cầu hiện tại)
-  const finalT = nGramScoreT * 0.5 + bridgeScoreT * 0.5;
-  const finalX = nGramScoreX * 0.5 + bridgeScoreX * 0.5;
-
-  const prediction = finalT >= finalX ? "T" : "X";
-  const top = Math.max(finalT, finalX);
-  const sumScore = Math.max(finalT + finalX, 0.0001);
-
-  const confidence = Number(
-    Math.min(89, Math.max(51, (top / sumScore) * 100)).toFixed(1)
-  );
-
-  const reason = `Kiểm tra ${seqArr.length} phiên (chuỗi gần nhất: ${recent12}): ${nGramSummary}; ${bridgeSummary}.`;
-
-  return {
-    phien_du_doan: predictedSession,
-    du_doan: prediction,
-    do_tin_cay: `${confidence}%`,
-    patten: currentPattern,
-    ly_do: reason,
-  };
-}
-
-async function fetchAndPredict() {
-  const now = Date.now();
-  if (cache.data && cache.expiresAt > now) {
-    return cache.data;
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 4000);
-
-  try {
-    const res = await fetch(SOURCE_API, {
-      signal: controller.signal,
-      headers: {
-        Accept: "application/json, text/plain, */*",
-      },
-    });
-    if (!res.ok) {
-      throw new Error(`API gốc trả về status ${res.status}`);
+        // 1. Nhận diện Cầu 1-1 (T-X-T-X hoặc X-T-X-T)
+        if (tail4 === 'TXTX' || tail4 === 'XTXT') {
+            predictionChar = currentChar === 'X' ? 'T' : 'X';
+            confidence = 85.5;
+            strategy = 'THEO CẦU 1-1';
+            reason = `Phát hiện nhịp cầu ngắn 1-1 (${seq.slice(-4).join('-')}) đang chạy rất đều. Tiếp tục bắt nhịp đảo luân phiên.`;
+        }
+        // 2. Nhận diện Cầu 2-2 (T-T-X-X hoặc X-X-T-T)
+        else if (tail4 === 'TTXX' || tail4 === 'XXTT') {
+            if (tail4 === 'TTXX') {
+                predictionChar = 'T';
+                reason = 'Hình thành cầu cặp 2-2 (T-T-X-X). Phiên tiếp theo mở đầu cặp Tài mới.';
+            } else {
+                predictionChar = 'X';
+                reason = 'Hình thành cầu cặp 2-2 (X-X-T-T). Phiên tiếp theo mở đầu cặp Xỉu mới.';
+            }
+            confidence = 82.0;
+            strategy = 'THEO CẦU 2-2';
+        }
+        // 3. Nhận diện Cầu 1-2-2 tiến lên 1-2-3
+        else if (tail5 === 'TXXTT' || tail5 === 'XTTXX') {
+            predictionChar = currentChar;
+            confidence = 79.5;
+            strategy = 'THEO CẦU 1-2-3';
+            reason = `Cầu đang phát triển theo thế 1-2-2 (${seq.slice(-5).join('-')}), ưu tiên đánh thuận theo đà lên tay thứ 3.`;
+        }
+        // 4. Nhận diện Cầu 1-2-1
+        else if (tail4 === 'TXXT' || tail4 === 'XTTX') {
+            predictionChar = currentChar;
+            confidence = 78.0;
+            strategy = 'THEO NHỊP 1-2';
+            reason = `Xuất hiện mẫu cầu ngắn 1-2-1 (${seq.slice(-4).join('-')}), dự đoán lặp lại vế đôi ở phiên kế tiếp.`;
+        }
+        // 5. Dây 3 tay liên tiếp
+        else if (streak === 3) {
+            predictionChar = currentChar;
+            confidence = 77.5;
+            strategy = 'THEO ĐÀ BỆT';
+            reason = `Cầu đã đi được 3 tay ${currentChar === 'T' ? 'Tài' : 'Xỉu'} liên tiếp, dấu hiệu chớm hình thành cầu bệt. Đánh theo cầu.`;
+        }
+        // 6. Dây 2 tay liên tiếp -> Dựa vào lực điểm tổng để theo tay 3 hoặc bẻ về 2-1
+        else if (streak === 2) {
+            const lastSum = sums[n - 1];
+            if ((currentChar === 'T' && lastSum >= 14) || (currentChar === 'X' && lastSum <= 7)) {
+                predictionChar = currentChar;
+                confidence = 76.5;
+                strategy = 'THEO CẦU';
+                reason = `Cầu đôi ${currentChar === 'T' ? 'Tài' : 'Xỉu'} có tổng điểm cực mạnh (${lastSum} điểm), lực cầu còn dư địa đi tiếp tay 3.`;
+            } else {
+                predictionChar = currentChar === 'T' ? 'X' : 'T';
+                confidence = 75.0;
+                strategy = 'BẺ NHỊP NGẮN';
+                reason = `Cầu ngắn đi 2 tay với điểm số trung bình (${lastSum} điểm), dễ gãy sang cầu 2-1. Chốt bẻ ngược.`;
+            }
+        }
+        // 7. Cầu biến động -> Tính trung bình động 5 phiên
+        else {
+            const recentSums = sums.slice(-5);
+            const avgSum = recentSums.reduce((a, b) => a + b, 0) / recentSums.length;
+            if (avgSum > 10.5) {
+                predictionChar = 'X';
+                reason = `Cầu ngắn đang biến động, trung bình điểm 5 phiên nghiêng mạnh về Tài (${avgSum.toFixed(1)}đ). Bắt nhịp cân bằng sang Xỉu.`;
+            } else {
+                predictionChar = 'T';
+                reason = `Cầu ngắn đang biến động, trung bình điểm 5 phiên nghiêng về Xỉu (${avgSum.toFixed(1)}đ). Bắt nhịp cân bằng sang Tài.`;
+            }
+            confidence = 73.5;
+            strategy = 'CÂN BẰNG ĐIỂM';
+        }
     }
-    const json = await res.json();
-    const list = Array.isArray(json) ? json : json.data ?? json.list;
-    const result = analyzeBridge(list);
+    // --- DỰ PHÒNG NẾU LỊCH SỬ TRẢ VỀ QUÁ ÍT (< 4 PHIÊN) ---
+    else {
+        predictionChar = currentChar === 'X' ? 'T' : 'X';
+        confidence = 68.0;
+        strategy = 'CẦU NGẮN';
+        reason = 'Dữ liệu lịch sử ngắn, áp dụng thuật toán đảo chiều cơ bản dựa trên phiên liền kề.';
+    }
 
-    cache = {
-      data: result,
-      expiresAt: now + CACHE_TTL_MS,
+    const dudoanText = predictionChar === 'T' ? 'Tài' : 'Xỉu';
+
+    return {
+        success: true,
+        phiendudoan: nextPhien,
+        dudoan: dudoanText,
+        dotincay: `${confidence}%`,
+        patten: recentPattern,
+        chienthuat: strategy,
+        lido: reason,
+        phien_gan_nhat: {
+            phien: lastItem.phien,
+            ket_qua: lastItem.result,
+            xuc_xac: lastItem.dice,
+            tong: lastItem.sum
+        }
     };
-    return result;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
-app.get("/vanhoa", async (req, res) => {
-  try {
-    const data = await fetchAndPredict();
-    res.json(data);
-  } catch (err) {
-    res.status(502).json({
-      error: "Không thể lấy hoặc phân tích dữ liệu từ API gốc",
-      detail: err.message,
+// Route mặc định kiểm tra server sống (tránh Render báo lỗi healthcheck)
+app.get('/', (req, res) => {
+    res.json({
+        status: 'Online',
+        message: 'API Dự đoán Tài Xỉu MD5 đang hoạt động. Truy cập /vanhoa để lấy dữ liệu dự đoán.'
     });
-  }
 });
 
-app.get("/", (req, res) => {
-  res.json({
-    status: "ok",
-    endpoint: "/vanhoa",
-    stored_sessions: historyStore.length,
-  });
+// Endpoint chính trả về dự đoán tự động
+app.get('/vanhoa', async (req, res) => {
+    const { data, error } = await fetchHistoryData();
+    if (error) {
+        return res.status(500).json({
+            success: false,
+            message: error
+        });
+    }
+
+    const result = analyzePatternVIP(data);
+    return res.json(result);
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+    console.log(`Server đang chạy tại cổng ${PORT}`);
 });
